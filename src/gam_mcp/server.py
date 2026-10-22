@@ -36,6 +36,13 @@ AUTH_TOKEN: Optional[str] = None
 HTTP_MODE = False
 MIN_AUTH_TOKEN_LENGTH = 32
 
+# Tools that create or change anything in Ad Manager carry this tag.
+# GAM_READ_ONLY=true disables them: they are neither listed nor callable.
+WRITE_TAG = "write"
+READ_ONLY_ENV = "GAM_READ_ONLY"
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"", "0", "false", "no", "off"}
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -198,7 +205,7 @@ def get_order(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def create_order(
     order_name: str,
     advertiser_id: int,
@@ -219,7 +226,7 @@ def create_order(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def find_or_create_order(
     order_name: str,
     advertiser_id: int,
@@ -260,7 +267,7 @@ def get_line_item(line_item_id: int, network_code: Optional[str] = None) -> str:
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def create_line_item(
     order_id: int,
     name: str,
@@ -333,7 +340,7 @@ def create_line_item(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def duplicate_line_item(
     source_line_item_id: int,
     new_name: str,
@@ -361,7 +368,7 @@ def duplicate_line_item(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def update_line_item(
     line_item_id: int,
     name: Optional[str] = None,
@@ -443,7 +450,7 @@ def list_line_items_by_order(order_id: int, network_code: Optional[str] = None) 
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def pause_line_item(line_item_id: int, network_code: Optional[str] = None) -> str:
     """Pause a delivering line item.
 
@@ -462,7 +469,7 @@ def pause_line_item(line_item_id: int, network_code: Optional[str] = None) -> st
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def resume_line_item(line_item_id: int, network_code: Optional[str] = None) -> str:
     """Resume a paused line item.
 
@@ -481,7 +488,7 @@ def resume_line_item(line_item_id: int, network_code: Optional[str] = None) -> s
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def archive_line_item(line_item_id: int, network_code: Optional[str] = None) -> str:
     """Archive a line item.
 
@@ -501,7 +508,7 @@ def archive_line_item(line_item_id: int, network_code: Optional[str] = None) -> 
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def approve_line_item(line_item_id: int, network_code: Optional[str] = None) -> str:
     """Approve a line item that requires approval.
 
@@ -524,7 +531,7 @@ def approve_line_item(line_item_id: int, network_code: Optional[str] = None) -> 
 # CREATIVE TOOLS
 # =============================================================================
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def upload_creative(
     file_path: str,
     advertiser_id: int,
@@ -565,7 +572,7 @@ def upload_creative(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def associate_creative_with_line_item(
     creative_id: int,
     line_item_id: int,
@@ -596,7 +603,7 @@ def associate_creative_with_line_item(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def upload_and_associate_creative(
     file_path: str,
     advertiser_id: int,
@@ -630,7 +637,7 @@ def upload_and_associate_creative(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def bulk_upload_creatives(
     folder_path: str,
     advertiser_id: int,
@@ -706,7 +713,7 @@ def list_creatives_by_advertiser(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def update_creative(
     creative_id: int,
     destination_url: Optional[str] = None,
@@ -793,7 +800,7 @@ def get_creative_preview_url(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def create_third_party_creative(
     advertiser_id: int,
     name: str,
@@ -888,7 +895,7 @@ def list_advertisers(limit: int = 100, network_code: Optional[str] = None) -> st
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def create_advertiser(
     name: str,
     email: Optional[str] = None,
@@ -916,7 +923,7 @@ def create_advertiser(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def find_or_create_advertiser(
     name: str,
     email: Optional[str] = None,
@@ -1212,7 +1219,7 @@ def run_custom_report(
 # CAMPAIGN WORKFLOW TOOL
 # =============================================================================
 
-@mcp.tool()
+@mcp.tool(tags={WRITE_TAG})
 def create_campaign(
     advertiser_name: str,
     order_name: str,
@@ -1420,9 +1427,38 @@ def init_client():
     )
 
 
+def read_only_requested(value: Optional[str]) -> bool:
+    """Parse GAM_READ_ONLY. Unrecognised values raise rather than silently allow writes.
+
+    Raises:
+        ValueError: If the value is not a recognised boolean
+    """
+    normalized = (value or "").strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{READ_ONLY_ENV} must be one of true/false, yes/no, on/off or 1/0, got '{value}'"
+    )
+
+
+def enable_read_only_mode() -> None:
+    """Disable every write tool so it is neither listed nor callable."""
+    mcp.disable(tags={WRITE_TAG})
+
+
 def main():
     """Main entry point for the MCP server."""
     global AUTH_TOKEN, HTTP_MODE
+
+    try:
+        read_only = read_only_requested(os.environ.get(READ_ONLY_ENV))
+    except ValueError as e:
+        sys.exit(f"Refusing to start: {e}")
+    if read_only:
+        enable_read_only_mode()
+        logger.info("Read-only mode: write tools are disabled")
 
     # Get transport mode from environment (default: stdio for CLI usage)
     transport = os.environ.get("GAM_MCP_TRANSPORT", "stdio").strip().lower()

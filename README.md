@@ -75,6 +75,13 @@ The server uses environment variables for configuration:
 | `GAM_MCP_AUTH_TOKEN` | Bearer token, at least 32 characters (HTTP mode only) | **Yes in HTTP mode** (the server refuses to start without it) |
 | `GAM_UPLOAD_DIR` | Directory that upload tools may read creative images from | Only for upload tools |
 | `GAM_API_VERSION` | Override the Ad Manager SOAP API version (default `v202608`) | No |
+| `GAM_READ_ONLY` | `true` disables all tools that create or change anything (default `false`) | No |
+
+### Read-Only Mode
+
+Set `GAM_READ_ONLY=true` to start with monitoring only. The 18 tools that create or change anything in Ad Manager (creating, updating, pausing, resuming, archiving and approving orders, line items, creatives and advertisers, uploads and `create_campaign`) are then neither listed nor callable; reading, verification, delivery progress and reports still work. Accepted values are `true/false`, `yes/no`, `on/off` and `1/0`; anything else stops the server from starting rather than silently allowing writes.
+
+Read-only mode is a server-side guard, not a replacement for permissions: give a monitoring-only deployment a service account with a read-only Ad Manager role as well.
 
 ### Creative Uploads
 

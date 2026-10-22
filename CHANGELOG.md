@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `GAM_READ_ONLY=true` read-only mode: the 18 tools that create or change anything are tagged `write` and are neither listed nor callable; unrecognised values stop the server from starting
 - `get_delivery_progress` tool: actual vs expected delivery (GAM's delivery indicator, as in the UI "Progress" bar) for delivering line items of an order or the whole network, flagging those behind by a configurable number of points
 
 ### Changed

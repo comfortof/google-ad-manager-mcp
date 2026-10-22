@@ -57,7 +57,8 @@ Instead, send a detailed report to: **youssef@matious.com**
 ### Google Ad Manager Permissions
 
 - Use service accounts with minimal required permissions; start with a read-only role
-- All authenticated callers share the service account's permissions: there is no per-user or per-tool authorization
+- Set `GAM_READ_ONLY=true` for monitoring-only deployments; write tools are then neither listed nor callable
+- All authenticated callers share the service account's permissions: there is no per-user authorization
 - Require human approval for write operations (pausing, archiving, pricing, goals, destinations, creatives)
 - Regularly audit service account access
 - Revoke unused service account keys
@@ -69,6 +70,7 @@ This project implements several security measures:
 - **Bearer Token Authentication**: In HTTP mode every request, including initialization, requires a valid token; authentication fails closed
 - **Constant-Time Comparison**: Prevents timing attacks on token validation
 - **Parameterized Queries**: All GAM API queries use bind variables to prevent injection
+- **Read-Only Mode**: `GAM_READ_ONLY=true` disables every tool that changes Ad Manager; unrecognised values refuse to start
 - **Upload Sandbox**: Upload tools only read regular image files inside `GAM_UPLOAD_DIR`, with size limits and image validation
 - **Non-Root Docker**: Container runs as an unprivileged user with no source tree or build tools
 - **Audit Logging**: Failed authentication attempts are logged (tokens are never logged)
