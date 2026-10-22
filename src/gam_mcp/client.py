@@ -7,10 +7,17 @@ from googleads import ad_manager, oauth2
 logger = logging.getLogger(__name__)
 
 
+def supported_api_versions() -> list[str]:
+    """Return the Ad Manager SOAP API versions the installed googleads library supports."""
+    return sorted(ad_manager._SERVICE_MAP)
+
+
 class GAMClient:
     """Google Ad Manager API client wrapper."""
 
-    DEFAULT_API_VERSION = "v202602"
+    # Newest SOAP version (sunset August 2027). Each version is supported for about
+    # a year: https://developers.google.com/ad-manager/api/deprecation
+    DEFAULT_API_VERSION = "v202608"
 
     def __init__(
         self,
@@ -25,13 +32,22 @@ class GAMClient:
             credentials_path: Path to service account JSON credentials file
             network_code: Ad Manager network code
             application_name: Application name for API requests
-            api_version: GAM API version override (e.g. "v202602"). Defaults to DEFAULT_API_VERSION.
+            api_version: GAM API version override (e.g. "v202608"). Defaults to DEFAULT_API_VERSION.
+
+        Raises:
+            ValueError: If the installed googleads library does not support the API version
         """
         self.credentials_path = credentials_path
         self.network_code = network_code
         self.application_name = application_name
         self._client: Optional[ad_manager.AdManagerClient] = None
         self._api_version = api_version or self.DEFAULT_API_VERSION
+        if self._api_version not in supported_api_versions():
+            raise ValueError(
+                f"Unsupported Ad Manager API version '{self._api_version}'. "
+                f"The installed googleads library supports: {', '.join(supported_api_versions())}"
+            )
+        self._time_zone: Optional[str] = None
 
     def _get_client(self) -> ad_manager.AdManagerClient:
         """Get or create the Ad Manager client."""
@@ -79,6 +95,21 @@ class GAMClient:
             A new StatementBuilder instance
         """
         return ad_manager.StatementBuilder(version=self._api_version)
+
+    def get_time_zone(self) -> str:
+        """Get the network's configured time zone (e.g. "Europe/Vilnius").
+
+        Fetched once from NetworkService and cached for the client's lifetime.
+        """
+        if self._time_zone is None:
+            network = self.get_service('NetworkService').getCurrentNetwork()
+            time_zone = network['timeZone'] if network else None
+            if not time_zone:
+                raise RuntimeError(
+                    f"Could not determine time zone for network {self.network_code}"
+                )
+            self._time_zone = time_zone
+        return self._time_zone
 
     def get_data_downloader(self):
         """Get the data downloader for reports.
@@ -157,7 +188,7 @@ def init_gam_client(
         network_code: Default Ad Manager network code
         application_name: Application name for API requests
         allowed_network_codes: Optional set of additional allowed network codes
-        api_version: GAM API version override (e.g. "v202602"). If None, uses GAMClient default.
+        api_version: GAM API version override (e.g. "v202608"). If None, uses GAMClient default.
 
     Returns:
         The initialized default GAM client

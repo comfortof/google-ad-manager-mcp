@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, date
 from typing import Optional
 from ..client import get_gam_client
-from ..utils import safe_get, extract_date
+from ..utils import safe_get, extract_date, fetch_all_pages
 
 logger = logging.getLogger(__name__)
 
@@ -42,22 +42,22 @@ def verify_line_item_setup(line_item_id: int, network_code: Optional[str] = None
     line_item = response['results'][0]
 
     result["line_item"] = {
-        "id": line_item['id'],
-        "name": line_item['name'],
-        "status": line_item['status'],
-        "type": line_item.get('lineItemType'),
-        "order_id": line_item['orderId']
+        "id": safe_get(line_item, 'id'),
+        "name": safe_get(line_item, 'name'),
+        "status": safe_get(line_item, 'status'),
+        "type": safe_get(line_item, 'lineItemType'),
+        "order_id": safe_get(line_item, 'orderId')
     }
 
     # Extract creative placeholders
-    if line_item.get('creativePlaceholders'):
-        for ph in line_item['creativePlaceholders']:
-            size = ph.get('size', {})
-            result["creative_placeholders"].append({
-                "width": size.get('width'),
-                "height": size.get('height'),
-                "size_string": f"{size.get('width')}x{size.get('height')}"
-            })
+    for ph in safe_get(line_item, 'creativePlaceholders') or []:
+        size = safe_get(ph, 'size')
+        width, height = safe_get(size, 'width'), safe_get(size, 'height')
+        result["creative_placeholders"].append({
+            "width": width,
+            "height": height,
+            "size_string": f"{width}x{height}"
+        })
 
     # Get creative associations using bind variable
     lica_service = client.get_service('LineItemCreativeAssociationService')
@@ -65,14 +65,16 @@ def verify_line_item_setup(line_item_id: int, network_code: Optional[str] = None
     lica_statement = lica_statement.Where(
         "lineItemId = :lineItemId"
     ).WithBindVariable('lineItemId', line_item_id)
-    lica_response = lica_service.getLineItemCreativeAssociationsByStatement(lica_statement.ToStatement())
+    licas = fetch_all_pages(
+        lica_service.getLineItemCreativeAssociationsByStatement, lica_statement
+    )
 
     creative_service = client.get_service('CreativeService')
 
-    if 'results' in lica_response:
-        for lica in lica_response['results']:
-            creative_id = lica['creativeId']
-            status = lica.get('status', 'UNKNOWN')
+    if licas:
+        for lica in licas:
+            creative_id = safe_get(lica, 'creativeId')
+            status = safe_get(lica, 'status', 'UNKNOWN')
 
             # Get creative details using bind variable
             creative_statement = client.create_statement()
@@ -89,18 +91,20 @@ def verify_line_item_setup(line_item_id: int, network_code: Optional[str] = None
                 "size_overrides": []
             }
 
-            if 'results' in creative_response and len(creative_response['results']) > 0:
-                creative = creative_response['results'][0]
-                creative_size = creative.get('size', {})
-                creative_info["creative_name"] = creative.get('name')
-                creative_info["creative_size"] = f"{creative_size.get('width')}x{creative_size.get('height')}"
+            creative_results = safe_get(creative_response, 'results') or []
+            if len(creative_results) > 0:
+                creative = creative_results[0]
+                creative_size = safe_get(creative, 'size')
+                creative_info["creative_name"] = safe_get(creative, 'name')
+                creative_info["creative_size"] = (
+                    f"{safe_get(creative_size, 'width')}x{safe_get(creative_size, 'height')}"
+                )
 
             # Check for size overrides in LICA
-            if lica.get('sizes'):
-                for size in lica['sizes']:
-                    creative_info["size_overrides"].append(
-                        f"{size.get('width')}x{size.get('height')}"
-                    )
+            for size in safe_get(lica, 'sizes') or []:
+                creative_info["size_overrides"].append(
+                    f"{safe_get(size, 'width')}x{safe_get(size, 'height')}"
+                )
 
             result["creative_associations"].append(creative_info)
 
@@ -169,6 +173,8 @@ def check_line_item_delivery_status(line_item_id: int, network_code: Optional[st
     li = response['results'][0]
     stats = safe_get(li, 'stats') or {}
     primary_goal = safe_get(li, 'primaryGoal') or {}
+    # GAM's own pacing figures; empty when the line item has no quantity goal
+    delivery_indicator = safe_get(li, 'deliveryIndicator')
 
     # Calculate progress
     goal_units = safe_get(primary_goal, 'units', 0) or 0
@@ -233,7 +239,10 @@ def check_line_item_delivery_status(line_item_id: int, network_code: Optional[st
             "total_days": total_days
         },
         "needs_creatives": safe_get(li, 'isMissingCreatives', False),
-        "is_set_to_deliver": safe_get(li, 'isSetTopBoxEnabled', False),
+        "delivery_indicator": {
+            "expected_delivery_percentage": safe_get(delivery_indicator, 'expectedDeliveryPercentage'),
+            "actual_delivery_percentage": safe_get(delivery_indicator, 'actualDeliveryPercentage'),
+        } if delivery_indicator is not None else None,
         "delivery_rate_type": safe_get(li, 'deliveryRateType')
     }
 
@@ -262,12 +271,13 @@ def verify_order_setup(order_id: int, network_code: Optional[str] = None) -> dic
     order = order_response['results'][0]
 
     result = {
-        "order_id": order['id'],
-        "order_name": order['name'],
-        "order_status": order['status'],
-        "advertiser_id": order.get('advertiserId'),
+        "order_id": safe_get(order, 'id'),
+        "order_name": safe_get(order, 'name'),
+        "order_status": safe_get(order, 'status'),
+        "advertiser_id": safe_get(order, 'advertiserId'),
         "line_items": [],
         "issues": [],
+        "errors": [],
         "overall_status": "OK"
     }
 
@@ -275,41 +285,55 @@ def verify_order_setup(order_id: int, network_code: Optional[str] = None) -> dic
     line_item_service = client.get_service('LineItemService')
     li_statement = client.create_statement()
     li_statement = li_statement.Where("orderId = :orderId").WithBindVariable('orderId', order_id)
-    li_response = line_item_service.getLineItemsByStatement(li_statement.ToStatement())
+    order_line_items = fetch_all_pages(line_item_service.getLineItemsByStatement, li_statement)
 
-    if 'results' in li_response:
-        for li in li_response['results']:
-            li_verification = verify_line_item_setup(li['id'], network_code=network_code)
+    for li in order_line_items:
+        li_id = safe_get(li, 'id')
+        li_name = safe_get(li, 'name')
+        try:
+            li_verification = verify_line_item_setup(li_id, network_code=network_code)
+        except Exception as e:
+            logger.exception("Verification failed for line item %s", li_id)
+            li_verification = {"error": f"Verification failed: {e}"}
 
-            if "error" in li_verification:
-                result["line_items"].append({
-                    "id": li['id'],
-                    "name": li['name'],
-                    "error": li_verification["error"]
-                })
-            else:
-                result["line_items"].append({
-                    "id": li['id'],
-                    "name": li_verification["line_item"]["name"],
-                    "status": li_verification["line_item"]["status"],
-                    "creative_count": li_verification["summary"]["creative_count"],
-                    "issue_count": li_verification["summary"]["issue_count"],
-                    "issues": li_verification["issues"]
-                })
+        if "error" in li_verification:
+            result["line_items"].append({
+                "id": li_id,
+                "name": li_name,
+                "error": li_verification["error"]
+            })
+            result["errors"].append({
+                "line_item_id": li_id,
+                "line_item_name": li_name,
+                "error": li_verification["error"]
+            })
+        else:
+            result["line_items"].append({
+                "id": li_id,
+                "name": li_verification["line_item"]["name"],
+                "status": li_verification["line_item"]["status"],
+                "creative_count": li_verification["summary"]["creative_count"],
+                "issue_count": li_verification["summary"]["issue_count"],
+                "issues": li_verification["issues"]
+            })
 
-                if li_verification["issues"]:
-                    result["issues"].extend([
-                        {**issue, "line_item_id": li['id'], "line_item_name": li['name']}
-                        for issue in li_verification["issues"]
-                    ])
+            if li_verification["issues"]:
+                result["issues"].extend([
+                    {**issue, "line_item_id": li_id, "line_item_name": li_name}
+                    for issue in li_verification["issues"]
+                ])
 
-    # Set overall status
-    if result["issues"]:
+    # Set overall status. A line item that could not be verified must not
+    # leave the order looking OK.
+    if result["errors"]:
+        result["overall_status"] = "INCOMPLETE"
+    elif result["issues"]:
         result["overall_status"] = "ISSUES_FOUND"
 
     result["summary"] = {
         "line_item_count": len(result["line_items"]),
-        "total_issues": len(result["issues"])
+        "total_issues": len(result["issues"]),
+        "unverified_line_items": len(result["errors"])
     }
 
     return result

@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Optional, List
 from ..client import get_gam_client
 from ..utils import safe_get
+from ..uploads import (
+    IMAGE_EXTENSIONS,
+    MAX_UPLOAD_BYTES,
+    UploadError,
+    image_dimensions,
+    read_upload_file,
+    resolve_upload_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +46,8 @@ def upload_creative(
     """Upload an image creative to Ad Manager.
 
     Args:
-        file_path: Path to the image file
+        file_path: Path to the image file, inside GAM_UPLOAD_DIR (relative paths
+            are resolved against it)
         advertiser_id: ID of the advertiser
         click_through_url: Destination URL when creative is clicked
         creative_name: Optional name for the creative (defaults to auto-generated)
@@ -49,26 +58,24 @@ def upload_creative(
     Returns:
         dict with created creative details
     """
-    client = get_gam_client(network_code=network_code)
-    creative_service = client.get_service('CreativeService')
-
-    path = Path(file_path)
-    filename = path.name
-
-    if not path.exists():
-        return {"error": f"File not found: {file_path}"}
-
-    # Read and encode image
-    with open(path, 'rb') as f:
-        image_data = f.read()
-
-    image_data_base64 = base64.b64encode(image_data).decode('utf-8')
-
-    # Extract size from filename
-    width, height = extract_size_from_filename(filename)
+    # Extract size from filename before touching the file
+    width, height = extract_size_from_filename(Path(file_path).name)
 
     if not width or not height:
-        return {"error": f"Could not extract size from filename: {filename}. Expected format like '300x250'"}
+        return {"error": f"Could not extract size from filename: {Path(file_path).name}. Expected format like '300x250'"}
+
+    try:
+        path = resolve_upload_path(file_path)
+        image_data = read_upload_file(path)
+        image_dimensions(image_data)
+    except UploadError as e:
+        return {"error": str(e)}
+
+    filename = path.name
+    image_data_base64 = base64.b64encode(image_data).decode('utf-8')
+
+    client = get_gam_client(network_code=network_code)
+    creative_service = client.get_service('CreativeService')
 
     # Determine creative size (use override if provided)
     creative_width = override_size_width if override_size_width else width
@@ -147,6 +154,17 @@ def upload_creative_from_base64(
     Returns:
         dict with created creative details
     """
+    try:
+        image_data = base64.b64decode(image_base64, validate=True)
+    except (ValueError, TypeError):
+        return {"error": "image_base64 is not valid base64 data"}
+    if len(image_data) > MAX_UPLOAD_BYTES:
+        return {"error": f"Image exceeds the {MAX_UPLOAD_BYTES} byte limit"}
+    try:
+        image_dimensions(image_data)
+    except UploadError as e:
+        return {"error": str(e)}
+
     client = get_gam_client(network_code=network_code)
     creative_service = client.get_service('CreativeService')
 
@@ -275,7 +293,10 @@ def upload_and_associate_creative(
     )
 
     if "error" in assoc_result:
+        # The creative now exists in GAM; report its ID so it is not uploaded again
         return {
+            "error": f"Creative {creative_id} uploaded but association failed: {assoc_result['error']}",
+            "creative_id": creative_id,
             "creative": upload_result,
             "association_error": assoc_result["error"]
         }
@@ -290,6 +311,19 @@ def upload_and_associate_creative(
     }
 
 
+def list_upload_images(folder_path: str) -> List[Path]:
+    """List image files directly inside an upload folder.
+
+    Raises:
+        UploadError: If the folder is not inside GAM_UPLOAD_DIR
+    """
+    folder = resolve_upload_path(folder_path, expect_dir=True)
+    return sorted(
+        p for p in folder.iterdir()
+        if p.suffix.lower() in IMAGE_EXTENSIONS and p.is_file()
+    )
+
+
 def bulk_upload_creatives(
     folder_path: str,
     advertiser_id: int,
@@ -301,7 +335,8 @@ def bulk_upload_creatives(
     """Upload all creatives from a folder and associate with a line item.
 
     Args:
-        folder_path: Path to folder containing image files
+        folder_path: Path to folder containing image files, inside GAM_UPLOAD_DIR
+            (relative paths are resolved against it)
         advertiser_id: ID of the advertiser
         line_item_id: ID of the line item
         click_through_url: Destination URL
@@ -311,16 +346,10 @@ def bulk_upload_creatives(
     Returns:
         dict with upload results
     """
-    folder = Path(folder_path)
-
-    if not folder.exists():
-        return {"error": f"Folder not found: {folder_path}"}
-
-    # Find all image files
-    extensions = ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.JPG', '*.JPEG', '*.PNG', '*.GIF']
-    files = []
-    for ext in extensions:
-        files.extend(folder.glob(ext))
+    try:
+        files = list_upload_images(folder_path)
+    except UploadError as e:
+        return {"error": str(e)}
 
     if not files:
         return {"error": f"No image files found in {folder_path}"}
@@ -341,20 +370,27 @@ def bulk_upload_creatives(
             if width and height:
                 creative_name = f"{name_prefix} - {width}x{height}"
 
-        result = upload_and_associate_creative(
-            file_path=str(file_path),
-            advertiser_id=advertiser_id,
-            line_item_id=line_item_id,
-            click_through_url=click_through_url,
-            creative_name=creative_name,
-            network_code=network_code
-        )
+        try:
+            result = upload_and_associate_creative(
+                file_path=str(file_path),
+                advertiser_id=advertiser_id,
+                line_item_id=line_item_id,
+                click_through_url=click_through_url,
+                creative_name=creative_name,
+                network_code=network_code
+            )
+        except Exception as e:
+            logger.exception("Creative upload failed for %s", file_path.name)
+            result = {"error": str(e)}
 
         if "error" in result:
-            results["failed"].append({
+            failure = {
                 "file": file_path.name,
                 "error": result["error"]
-            })
+            }
+            if result.get("creative_id"):
+                failure["creative_id"] = result["creative_id"]
+            results["failed"].append(failure)
         else:
             results["uploaded"].append({
                 "file": file_path.name,
@@ -364,6 +400,7 @@ def bulk_upload_creatives(
 
     results["success_count"] = len(results["uploaded"])
     results["fail_count"] = len(results["failed"])
+    results["success"] = results["fail_count"] == 0
     results["message"] = f"Uploaded {results['success_count']} of {results['total_files']} creatives"
 
     return results

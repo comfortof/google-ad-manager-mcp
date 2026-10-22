@@ -144,7 +144,7 @@ def create_line_item(
             'hour': 23,
             'minute': 59,
             'second': 59,
-            'timeZoneId': 'Africa/Casablanca'
+            'timeZoneId': client.get_time_zone()
         },
         'costType': 'CPM',
         'costPerUnit': {
@@ -351,28 +351,30 @@ def update_line_item(
 
     # Update cost per unit
     if cost_per_unit_micro is not None or currency_code is not None:
-        if 'costPerUnit' not in line_item:
+        if safe_get(line_item, 'costPerUnit') is None:
             line_item['costPerUnit'] = {}
+        cost_per_unit = line_item['costPerUnit']
 
         if cost_per_unit_micro is not None:
-            old_cost = safe_get(line_item.get('costPerUnit', {}), 'microAmount', 0)
-            line_item['costPerUnit']['microAmount'] = cost_per_unit_micro
+            old_cost = safe_get(cost_per_unit, 'microAmount', 0)
+            cost_per_unit['microAmount'] = cost_per_unit_micro
             changes.append(f"costPerUnit.microAmount: {old_cost} -> {cost_per_unit_micro}")
 
         if currency_code is not None:
-            old_currency = safe_get(line_item.get('costPerUnit', {}), 'currencyCode')
-            line_item['costPerUnit']['currencyCode'] = currency_code
+            old_currency = safe_get(cost_per_unit, 'currencyCode')
+            cost_per_unit['currencyCode'] = currency_code
             changes.append(f"costPerUnit.currencyCode: '{old_currency}' -> '{currency_code}'")
 
     # Update goal impressions
     if goal_impressions is not None:
-        if 'primaryGoal' not in line_item:
+        if safe_get(line_item, 'primaryGoal') is None:
             line_item['primaryGoal'] = {
                 'goalType': 'LIFETIME',
                 'unitType': 'IMPRESSIONS'
             }
-        old_goal = safe_get(line_item.get('primaryGoal', {}), 'units', 0)
-        line_item['primaryGoal']['units'] = goal_impressions
+        primary_goal = line_item['primaryGoal']
+        old_goal = safe_get(primary_goal, 'units', 0)
+        primary_goal['units'] = goal_impressions
         changes.append(f"primaryGoal.units: {old_goal} -> {goal_impressions}")
 
     # Update end date
@@ -383,7 +385,7 @@ def update_line_item(
             'hour': 23,
             'minute': 59,
             'second': 59,
-            'timeZoneId': 'Africa/Casablanca'
+            'timeZoneId': client.get_time_zone()
         }
         new_end = f"{end_year}-{end_month:02d}-{end_day:02d}"
         changes.append(f"endDateTime: '{old_end}' -> '{new_end}'")
@@ -391,33 +393,44 @@ def update_line_item(
     if not changes:
         return {"error": "No changes specified. Provide at least one field to update."}
 
-    # Perform the update
+    # Perform the update. Errors raised here mean GAM rejected the mutation.
     updated = line_item_service.updateLineItems([line_item])
 
     if not updated:
         return {"error": "Failed to update line item"}
 
-    updated_li = updated[0]
-
-    # Extract updated values for response
-    end_date = extract_date(safe_get(updated_li, 'endDateTime'))
-
-    return {
-        "id": safe_get(updated_li, 'id'),
-        "name": safe_get(updated_li, 'name'),
-        "order_id": safe_get(updated_li, 'orderId'),
-        "status": safe_get(updated_li, 'status'),
-        "type": safe_get(updated_li, 'lineItemType'),
-        "delivery_rate_type": safe_get(updated_li, 'deliveryRateType'),
-        "priority": safe_get(updated_li, 'priority'),
-        "cost_type": safe_get(updated_li, 'costType'),
-        "cost_per_unit_micro": safe_get(updated_li.get('costPerUnit', {}), 'microAmount'),
-        "currency_code": safe_get(updated_li.get('costPerUnit', {}), 'currencyCode'),
-        "goal_impressions": safe_get(updated_li.get('primaryGoal', {}), 'units'),
-        "end_date": end_date,
+    # From here on the update has been applied; formatting problems must not
+    # be reported as a failed update, or callers may retry a committed change.
+    result = {
+        "id": line_item_id,
         "changes": changes,
         "message": f"Line item {line_item_id} updated successfully"
     }
+    try:
+        updated_li = updated[0]
+        cost_per_unit = safe_get(updated_li, 'costPerUnit')
+        primary_goal = safe_get(updated_li, 'primaryGoal')
+        result.update({
+            "id": safe_get(updated_li, 'id'),
+            "name": safe_get(updated_li, 'name'),
+            "order_id": safe_get(updated_li, 'orderId'),
+            "status": safe_get(updated_li, 'status'),
+            "type": safe_get(updated_li, 'lineItemType'),
+            "delivery_rate_type": safe_get(updated_li, 'deliveryRateType'),
+            "priority": safe_get(updated_li, 'priority'),
+            "cost_type": safe_get(updated_li, 'costType'),
+            "cost_per_unit_micro": safe_get(cost_per_unit, 'microAmount'),
+            "currency_code": safe_get(cost_per_unit, 'currencyCode'),
+            "goal_impressions": safe_get(primary_goal, 'units'),
+            "end_date": extract_date(safe_get(updated_li, 'endDateTime')),
+        })
+    except Exception:
+        logger.exception("Line item %s updated, but formatting the response failed", line_item_id)
+        result["warning"] = (
+            "The update was applied, but the updated values could not be read back. "
+            "Use get_line_item to check the current state; do not retry the update."
+        )
+    return result
 
 
 def list_line_items_by_order(order_id: int, network_code: Optional[str] = None) -> dict:

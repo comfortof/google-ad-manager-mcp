@@ -1,34 +1,45 @@
-FROM debian:bookworm-slim
+# syntax=docker/dockerfile:1
 
-ENV DEBIAN_FRONTEND=noninteractive
+# ---- Build stage: install locked dependencies into a virtualenv ----
+FROM python:3.12-slim-bookworm AS builder
 
-# Install Node.js, npm, mcp-proxy, and Python via uv
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git \
-    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g mcp-proxy@5.12.0 \
-    && node --version \
-    && curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="/usr/local/bin" sh \
-    && uv python install 3.10 --default --preview \
-    && ln -s $(uv python find) /usr/local/bin/python \
-    && python --version \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+COPY --from=ghcr.io/astral-sh/uv:0.5.9 /uv /usr/local/bin/uv
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
 
-# Copy project files
-COPY . .
+# Copy only what the build needs (see .dockerignore); never the whole checkout
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-# Install dependencies
-RUN uv sync
+COPY src ./src
+RUN uv sync --frozen --no-dev --no-editable
 
-# Environment variables (set at runtime)
-# GAM_CREDENTIALS_PATH: Path to service account JSON
-# GAM_NETWORK_CODE: Your Google Ad Manager network code
+# ---- Runtime stage: no build tools, no source tree, non-root ----
+FROM python:3.12-slim-bookworm
 
-EXPOSE 8080
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
 
-# Run via mcp-proxy with shell mode to properly handle uv
-CMD ["mcp-proxy", "--shell", "uv run python -m gam_mcp.server"]
+COPY --from=builder /app/.venv /app/.venv
+
+# Native, authenticated HTTP transport. GAM_MCP_AUTH_TOKEN must be provided at
+# runtime or the server refuses to start. Override GAM_MCP_TRANSPORT=stdio for
+# `docker run -i` use from a local MCP client.
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    GAM_MCP_TRANSPORT=http \
+    GAM_MCP_HOST=0.0.0.0 \
+    GAM_MCP_PORT=8000 \
+    GAM_CREDENTIALS_PATH=/run/secrets/gam-credentials.json \
+    GAM_UPLOAD_DIR=/uploads
+
+USER app
+WORKDIR /tmp
+
+EXPOSE 8000
+
+CMD ["gam-mcp"]

@@ -1,19 +1,21 @@
-"""Google Ad Manager MCP Server with HTTP/SSE and stdio transport.
+"""Google Ad Manager MCP Server with HTTP and stdio transport.
 
 Security: Implements Bearer token authentication following MCP security best practices.
-- Uses FastMCP native middleware for proper lifecycle management
-- Cryptographically secure token generation (secrets.token_hex)
+- HTTP mode refuses to start without a strong GAM_MCP_AUTH_TOKEN
+- Every HTTP request (initialize, session and tool calls) is authenticated at the
+  ASGI layer; tool calls are re-checked by FastMCP middleware as defense in depth
+- Authentication fails closed: any missing configuration or header error denies access
 - Constant-time token comparison to prevent timing attacks
-- All authentication decisions logged for audit trail
+- The token itself is never logged
 
 Reference: https://modelcontextprotocol.io/specification/draft/basic/security_best_practices
 Reference: https://gofastmcp.com/python-sdk/fastmcp-server-auth-auth
 """
 
 import os
+import sys
 import json
 import logging
-import secrets
 import hmac
 from typing import Optional
 
@@ -22,12 +24,17 @@ from fastmcp import FastMCP, Context
 from fastmcp.server.middleware import Middleware
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.exceptions import ToolError
+from starlette.middleware import Middleware as ASGIMiddleware
 
 from .client import init_gam_client, get_gam_client, is_gam_client_initialized
 from .tools import orders, line_items, creatives, advertisers, verification, reporting
+from .uploads import UploadError
 
-# Authentication token - set via environment variable or generate random
-AUTH_TOKEN = os.environ.get("GAM_MCP_AUTH_TOKEN", None)
+# Authentication state - populated by main() when running with HTTP transport.
+# In stdio mode the server is a local child process and HTTP_MODE stays False.
+AUTH_TOKEN: Optional[str] = None
+HTTP_MODE = False
+MIN_AUTH_TOKEN_LENGTH = 32
 
 # Configure logging
 logging.basicConfig(
@@ -41,32 +48,94 @@ mcp = FastMCP(name="Google Ad Manager")
 
 
 # =============================================================================
-# AUTHENTICATION MIDDLEWARE (FastMCP Native)
+# AUTHENTICATION
 # =============================================================================
 
+def _token_matches(auth_header: str, expected: str) -> bool:
+    """Check an Authorization header value against the expected token."""
+    if not auth_header.startswith("Bearer "):
+        return False
+    token = auth_header[7:]  # Remove "Bearer " prefix
+    # Constant-time comparison to prevent timing attacks
+    return hmac.compare_digest(token.encode('utf-8'), expected.encode('utf-8'))
+
+
+def validate_auth_token(token: Optional[str]) -> str:
+    """Validate the HTTP auth token, raising ValueError if it is unusable."""
+    if token is None or not token.strip():
+        raise ValueError(
+            "GAM_MCP_AUTH_TOKEN must be set to a non-empty value when using HTTP transport. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+        )
+    token = token.strip()
+    if len(token) < MIN_AUTH_TOKEN_LENGTH:
+        raise ValueError(
+            f"GAM_MCP_AUTH_TOKEN must be at least {MIN_AUTH_TOKEN_LENGTH} characters long."
+        )
+    return token
+
+
+class BearerTokenASGIMiddleware:
+    """ASGI middleware that requires a valid Bearer token on every HTTP request.
+
+    Runs before FastMCP handles the request, so initialization and session
+    endpoints are protected as well as tool calls.
+    """
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = validate_auth_token(token)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        auth_header = ""
+        for name, value in scope.get("headers", []):
+            if name.lower() == b"authorization":
+                auth_header = value.decode("latin-1")
+                break
+
+        if not _token_matches(auth_header, self.token):
+            logger.warning("Auth failed: missing or invalid bearer token on %s", scope.get("path"))
+            body = json.dumps({"error": "unauthorized"}).encode("utf-8")
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"www-authenticate", b'Bearer realm="gam-mcp"'),
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        return await self.app(scope, receive, send)
+
+
 class BearerAuthMiddleware(Middleware):
-    """FastMCP middleware for Bearer token authentication.
+    """FastMCP middleware for Bearer token authentication on tool calls.
 
-    Validates Authorization header on all tool calls.
-    Uses constant-time comparison to prevent timing attacks.
-
-    Reference: https://gelembjuk.com/blog/post/authentication-remote-mcp-server-python/
+    Defense in depth behind BearerTokenASGIMiddleware. Only active in HTTP mode
+    (stdio is a local child process), and fails closed on any error.
     """
 
     async def on_call_tool(self, context, call_next):
         """Validate bearer token before tool execution."""
-        global AUTH_TOKEN
+        if not HTTP_MODE:
+            return await call_next(context)
 
         if not AUTH_TOKEN:
-            # No auth configured, allow request
-            return await call_next(context)
+            logger.error("Auth failed: HTTP mode without a configured token")
+            raise ToolError("Access denied: server authentication is not configured")
 
         try:
-            headers = get_http_headers()
+            headers = get_http_headers(include={"authorization"})
             auth_header = headers.get("authorization", "")
         except Exception:
-            # If we can't get headers (e.g., stdio transport), skip auth
-            return await call_next(context)
+            logger.warning("Auth failed: could not read request headers")
+            raise ToolError("Access denied: unable to verify credentials")
 
         if not auth_header:
             logger.warning("Auth failed: Missing Authorization header")
@@ -76,10 +145,7 @@ class BearerAuthMiddleware(Middleware):
             logger.warning("Auth failed: Invalid Authorization format")
             raise ToolError("Access denied: Invalid Authorization format. Use: Authorization: Bearer <token>")
 
-        token = auth_header[7:]  # Remove "Bearer " prefix
-
-        # Constant-time comparison to prevent timing attacks
-        if not hmac.compare_digest(token.encode('utf-8'), AUTH_TOKEN.encode('utf-8')):
+        if not _token_matches(auth_header, AUTH_TOKEN):
             logger.warning("Auth failed: Invalid token")
             raise ToolError("Access denied: Invalid token")
 
@@ -89,7 +155,6 @@ class BearerAuthMiddleware(Middleware):
 
 # Add middleware to MCP server
 mcp.add_middleware(BearerAuthMiddleware())
-logger.info("Bearer token authentication middleware enabled")
 
 
 # =============================================================================
@@ -472,7 +537,7 @@ def upload_creative(
     """Upload an image creative to Ad Manager.
 
     Args:
-        file_path: Path to the image file
+        file_path: Path to the image file inside GAM_UPLOAD_DIR (relative paths are resolved against it)
         advertiser_id: ID of the advertiser
         click_through_url: Destination URL when clicked
         creative_name: Optional name for the creative
@@ -543,7 +608,7 @@ def upload_and_associate_creative(
     """Upload a creative and associate it with a line item in one step.
 
     Args:
-        file_path: Path to the image file
+        file_path: Path to the image file inside GAM_UPLOAD_DIR (relative paths are resolved against it)
         advertiser_id: ID of the advertiser
         line_item_id: ID of the line item
         click_through_url: Destination URL when clicked
@@ -577,7 +642,7 @@ def bulk_upload_creatives(
     """Upload all creatives from a folder and associate with a line item.
 
     Args:
-        folder_path: Path to folder containing image files
+        folder_path: Path to folder containing image files inside GAM_UPLOAD_DIR (relative paths are resolved against it)
         advertiser_id: ID of the advertiser
         line_item_id: ID of the line item
         click_through_url: Destination URL when clicked
@@ -1141,7 +1206,7 @@ def create_campaign(
         end_year: End date year
         end_month: End date month (1-12)
         end_day: End date day (1-31)
-        creatives_folder: Path to folder containing creative images
+        creatives_folder: Path to folder containing creative images inside GAM_UPLOAD_DIR (relative paths are resolved against it)
         click_through_url: Destination URL for all creatives
         target_ad_unit_id: Ad unit ID to target (find via GAM UI or ad unit tools)
         goal_impressions: Impression goal (default: 100000)
@@ -1176,6 +1241,18 @@ def create_campaign(
         except json.JSONDecodeError as e:
             result["errors"].append(f"Invalid creative_sizes JSON: {e}")
             return json.dumps(result, indent=2)
+
+    # Validate the creatives folder before creating anything in GAM
+    try:
+        creative_files = creatives.list_upload_images(creatives_folder)
+    except UploadError as e:
+        result["errors"].append(f"Creatives folder: {e}")
+        result["success"] = False
+        return json.dumps(result, indent=2)
+    if not creative_files:
+        result["errors"].append(f"Creatives folder: no image files found in {creatives_folder}")
+        result["success"] = False
+        return json.dumps(result, indent=2)
 
     try:
         # Step 1: Find or create advertiser
@@ -1228,12 +1305,32 @@ def create_campaign(
         )
         result["creatives"] = creative_result
 
-        result["success"] = True
-        result["message"] = f"Campaign '{order_name}' created successfully"
+        if "error" in creative_result:
+            result["errors"].append(f"Creatives: {creative_result['error']}")
+        elif creative_result.get("fail_count"):
+            result["errors"].append(
+                f"Creatives: {creative_result['fail_count']} of "
+                f"{creative_result['total_files']} failed to upload or associate"
+            )
+
+        if result["errors"]:
+            result["success"] = False
+            result["message"] = (
+                f"Campaign '{order_name}' only partially created; see errors. "
+                "Objects listed above already exist in GAM - fix the cause and "
+                "retry only the failed steps rather than the whole workflow."
+            )
+        else:
+            result["success"] = True
+            result["message"] = f"Campaign '{order_name}' created successfully"
 
     except Exception as e:
         result["errors"].append(str(e))
         result["success"] = False
+        result["message"] = (
+            "Campaign creation stopped with an error. Objects listed above may "
+            "already exist in GAM; check them before retrying."
+        )
 
     return json.dumps(result, indent=2)
 
@@ -1294,36 +1391,39 @@ def init_client():
 
 def main():
     """Main entry point for the MCP server."""
-    global AUTH_TOKEN
+    global AUTH_TOKEN, HTTP_MODE
 
     # Get transport mode from environment (default: stdio for CLI usage)
-    transport = os.environ.get("GAM_MCP_TRANSPORT", "stdio").lower()
-    host = os.environ.get("GAM_MCP_HOST", "0.0.0.0")
-    port = int(os.environ.get("GAM_MCP_PORT", "8000"))
+    transport = os.environ.get("GAM_MCP_TRANSPORT", "stdio").strip().lower()
 
     if transport == "stdio":
         # Stdio transport - no auth token needed (local process)
         logger.info("Starting GAM MCP Server with stdio transport")
         mcp.run(transport="stdio")
-    else:
-        # HTTP transport - set up auth token
-        if AUTH_TOKEN is None:
-            AUTH_TOKEN = secrets.token_hex(32)
-            logger.info("Generated auth token (set GAM_MCP_AUTH_TOKEN env var to use a fixed token)")
+        return
 
-        logger.info("")
-        logger.info("=" * 60)
-        logger.info("GAM MCP Server Authentication Token:")
-        logger.info(AUTH_TOKEN)
-        logger.info("=" * 60)
-        logger.info("")
-        logger.info("Use this token in the Authorization header:")
-        logger.info(f"Authorization: Bearer {AUTH_TOKEN}")
-        logger.info("")
+    if transport != "http":
+        sys.exit(f"Unsupported GAM_MCP_TRANSPORT '{transport}'. Use 'stdio' or 'http'.")
 
-        # Run using FastMCP's native runner (proper lifecycle management)
-        logger.info(f"Starting GAM MCP Server on http://{host}:{port}/mcp")
-        mcp.run(transport="http", host=host, port=port, path="/mcp")
+    host = os.environ.get("GAM_MCP_HOST", "127.0.0.1")
+    port = int(os.environ.get("GAM_MCP_PORT", "8000"))
+
+    # HTTP transport - a strong, explicitly provisioned token is mandatory
+    try:
+        AUTH_TOKEN = validate_auth_token(os.environ.get("GAM_MCP_AUTH_TOKEN"))
+    except ValueError as e:
+        sys.exit(f"Refusing to start: {e}")
+    HTTP_MODE = True
+
+    logger.info("Bearer token authentication enabled (token not logged)")
+    logger.info(f"Starting GAM MCP Server on http://{host}:{port}/mcp")
+    mcp.run(
+        transport="http",
+        host=host,
+        port=port,
+        path="/mcp",
+        middleware=[ASGIMiddleware(BearerTokenASGIMiddleware, token=AUTH_TOKEN)],
+    )
 
 
 if __name__ == "__main__":

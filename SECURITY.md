@@ -40,20 +40,25 @@ Instead, send a detailed report to: **youssef@matious.com**
 
 ### Credential Management
 
-- Never commit `credentials.json` or service account keys to version control
-- Use environment variables for sensitive configuration
+- Never commit `credentials.json` or service account keys to version control, and keep them outside the checkout (the Docker build context is allowlisted by `.dockerignore`)
+- Restrict key file permissions (`chmod 600`) and rotate keys periodically
+- Provision `GAM_MCP_AUTH_TOKEN` from a secret manager; the server never logs it
 - Rotate authentication tokens periodically
 
 ### Deployment
 
-- Always use authentication tokens in production (`GAM_MCP_AUTH_TOKEN`)
-- Use HTTPS for remote deployments
-- Run the Docker container as non-root (default configuration)
-- Restrict network access to the MCP server endpoint
+- Prefer the local stdio transport for single-user use
+- HTTP mode requires `GAM_MCP_AUTH_TOKEN` (at least 32 characters) and refuses to start without it
+- Use HTTPS and network access controls for remote deployments; the HTTP host defaults to `127.0.0.1`
+- The Docker image runs as an unprivileged user (UID 10001); also run it with `--read-only`, `--cap-drop ALL`, `no-new-privileges` and resource limits
+- Point `GAM_UPLOAD_DIR` at a dedicated folder containing only creatives
+- Pin the package version and build from the committed `uv.lock`
 
 ### Google Ad Manager Permissions
 
-- Use service accounts with minimal required permissions
+- Use service accounts with minimal required permissions; start with a read-only role
+- All authenticated callers share the service account's permissions: there is no per-user or per-tool authorization
+- Require human approval for write operations (pausing, archiving, pricing, goals, destinations, creatives)
 - Regularly audit service account access
 - Revoke unused service account keys
 
@@ -61,11 +66,12 @@ Instead, send a detailed report to: **youssef@matious.com**
 
 This project implements several security measures:
 
-- **Bearer Token Authentication**: All tool calls require valid authentication
+- **Bearer Token Authentication**: In HTTP mode every request, including initialization, requires a valid token; authentication fails closed
 - **Constant-Time Comparison**: Prevents timing attacks on token validation
 - **Parameterized Queries**: All GAM API queries use bind variables to prevent injection
-- **Non-Root Docker**: Container runs as unprivileged user
-- **Audit Logging**: Authentication attempts are logged for monitoring
+- **Upload Sandbox**: Upload tools only read regular image files inside `GAM_UPLOAD_DIR`, with size limits and image validation
+- **Non-Root Docker**: Container runs as an unprivileged user with no source tree or build tools
+- **Audit Logging**: Failed authentication attempts are logged (tokens are never logged)
 
 ## Acknowledgments
 

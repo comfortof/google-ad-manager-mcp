@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Upgraded FastMCP from 2.14 to 4.1 (MCP SDK 2.3); this drops the `diskcache` dependency and resolves the FastMCP and diskcache advisories from the security review
+- Upgraded `googleads` from 48 to 51 and moved the default Ad Manager SOAP API version to `v202608` (sunset August 2027); the previous default `v202602` was not supported by `googleads` 48
+- The server now refuses to start when `GAM_API_VERSION` names a version the installed `googleads` library does not support
+
+### Security
+
+- HTTP transport now requires `GAM_MCP_AUTH_TOKEN` (at least 32 characters) and refuses to start without it; empty tokens no longer disable authentication
+- Every HTTP request, including initialization, is authenticated at the ASGI layer; tool-level checks fail closed
+- Tool-level authentication reads the `Authorization` header explicitly, which FastMCP 4 strips from its default header helper
+- The auth token is no longer written to logs; the HTTP host defaults to `127.0.0.1`
+- Upload tools only read regular PNG/JPEG/GIF files up to 10 MB inside the new `GAM_UPLOAD_DIR`; symlinks escaping it are refused
+- Docker image rebuilt: native authenticated HTTP instead of an unauthenticated `mcp-proxy`, non-root user, allowlisted build context, locked dependencies
+- `secrets/` and key files are git-ignored; `uv.lock` is now committed
+
+### Fixed
+
+- `create_campaign` no longer reports success when creative uploads or associations fail, and validates the creatives folder before creating anything
+- Association failures in `upload_and_associate_creative` are reported as errors, fixing a `KeyError` in `bulk_upload_creatives`
+- `update_line_item` works with real Zeep responses, and a successful update is no longer reported as a failure
+- Order verification follows pagination and reports `INCOMPLETE` when a line item cannot be verified
+- Line item end dates use the network's configured time zone instead of `Africa/Casablanca`
+- `check_line_item_delivery_status` reports GAM's `delivery_indicator` instead of the mislabelled `is_set_to_deliver` (which was `isSetTopBoxEnabled`)
+
 ## [0.1.13] - 2026-03-10
 
 ### Added

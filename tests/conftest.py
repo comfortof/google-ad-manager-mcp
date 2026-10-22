@@ -96,3 +96,24 @@ def sample_advertiser_data():
         "type": "ADVERTISER",
         "creditStatus": "ACTIVE",
     }
+
+
+# Smallest valid 1x1 PNG header used for upload tests
+def make_png(width: int = 300, height: int = 250) -> bytes:
+    """Build PNG bytes whose header carries the given dimensions."""
+    import struct
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13) + b"IHDR"
+        + struct.pack(">II", width, height)
+        + b"\x08\x06\x00\x00\x00" + b"\x00" * 4
+    )
+
+
+@pytest.fixture
+def upload_dir(tmp_path, monkeypatch):
+    """A dedicated upload directory configured via GAM_UPLOAD_DIR."""
+    root = tmp_path / "uploads"
+    root.mkdir()
+    monkeypatch.setenv("GAM_UPLOAD_DIR", str(root))
+    return root

@@ -113,3 +113,31 @@ def zeep_to_dict(obj: Any) -> Any:
         pass
 
     return str(obj)
+
+
+PAGE_SIZE = 500
+
+
+def fetch_all_pages(fetch, statement_builder, page_size: int = PAGE_SIZE) -> list:
+    """Fetch every result for a statement, following pagination.
+
+    Args:
+        fetch: A service method such as LineItemService.getLineItemsByStatement
+        statement_builder: A googleads StatementBuilder; its limit and offset are reset
+        page_size: Number of results to request per page
+
+    Returns:
+        A list of all results across pages
+    """
+    statement_builder.limit = page_size
+    statement_builder.offset = 0
+    results = []
+    while True:
+        response = fetch(statement_builder.ToStatement())
+        page = list(safe_get(response, 'results') or [])
+        results.extend(page)
+        total = safe_get(response, 'totalResultSetSize')
+        if len(page) < page_size or (total is not None and len(results) >= total):
+            break
+        statement_builder.offset += page_size
+    return results

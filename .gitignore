@@ -67,6 +67,9 @@ credentials.json
 *-credentials.json
 *credentials*.json
 serviceaccount*.json
+*service-account*.json
+*key*.json
+secrets/
 
 # OS files
 .DS_Store
@@ -101,4 +104,3 @@ dmypy.json
 
 # pyright
 pyrightconfig.json
-uv.lock

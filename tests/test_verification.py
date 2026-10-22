@@ -442,3 +442,108 @@ class TestVerifyOrderSetup:
         result = verification.verify_order_setup(order_id=123)
 
         assert "error" in result["line_items"][0]
+
+
+class TestVerificationReliability:
+    """Pagination, error status and Zeep-compatibility regressions."""
+
+    @staticmethod
+    def _order_client(mock_get_client, line_item_pages):
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        order_service = MagicMock()
+        order_service.getOrdersByStatement.return_value = {
+            "results": [{"id": 123, "name": "Order", "status": "APPROVED"}]
+        }
+        li_service = MagicMock()
+        li_service.getLineItemsByStatement.side_effect = line_item_pages
+        mock_client.get_service.side_effect = (
+            lambda name: order_service if name == "OrderService" else li_service
+        )
+        mock_client.create_statement.return_value = MagicMock()
+        return li_service
+
+    @patch("gam_mcp.tools.verification.get_gam_client")
+    @patch("gam_mcp.tools.verification.verify_line_item_setup")
+    def test_verifies_line_items_on_every_page(self, mock_verify_li, mock_get_client):
+        page_size = 500
+        first = [{"id": i, "name": f"LI {i}"} for i in range(page_size)]
+        second = [{"id": page_size, "name": "Broken"}]
+        li_service = self._order_client(mock_get_client, [
+            {"results": first, "totalResultSetSize": page_size + 1},
+            {"results": second, "totalResultSetSize": page_size + 1},
+        ])
+
+        def verify(li_id, network_code=None):
+            issues = [{"type": "SIZE_MISMATCH"}] if li_id == page_size else []
+            return {
+                "line_item": {"name": "x", "status": "READY"},
+                "summary": {"creative_count": 1, "issue_count": len(issues)},
+                "issues": issues,
+            }
+        mock_verify_li.side_effect = verify
+
+        result = verification.verify_order_setup(order_id=123)
+
+        assert li_service.getLineItemsByStatement.call_count == 2
+        assert result["summary"]["line_item_count"] == page_size + 1
+        assert result["overall_status"] == "ISSUES_FOUND"
+
+    @patch("gam_mcp.tools.verification.get_gam_client")
+    @patch("gam_mcp.tools.verification.verify_line_item_setup")
+    def test_child_errors_make_status_incomplete(self, mock_verify_li, mock_get_client):
+        self._order_client(mock_get_client, [{"results": [{"id": 1, "name": "LI"}, {"id": 2, "name": "LI 2"}]}])
+        mock_verify_li.side_effect = [{"error": "not found"}, RuntimeError("API fault")]
+
+        result = verification.verify_order_setup(order_id=123)
+
+        assert result["overall_status"] == "INCOMPLETE"
+        assert result["summary"]["unverified_line_items"] == 2
+        assert "API fault" in result["errors"][1]["error"]
+
+    @patch("gam_mcp.tools.verification.get_gam_client")
+    def test_line_item_setup_works_with_attribute_only_objects(self, mock_get_client, mock_zeep_object):
+        """Objects without .get() (like zeep) must not crash verification."""
+        Z = mock_zeep_object
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        li_service, lica_service, creative_service = MagicMock(), MagicMock(), MagicMock()
+        li_service.getLineItemsByStatement.return_value = {"results": [Z({
+            "id": 1, "name": "LI", "status": "READY", "lineItemType": "STANDARD", "orderId": 9,
+            "creativePlaceholders": [Z({"size": Z({"width": 300, "height": 250})})],
+        })]}
+        lica_service.getLineItemCreativeAssociationsByStatement.return_value = {"results": [
+            Z({"creativeId": 5, "status": "ACTIVE", "sizes": None})
+        ]}
+        creative_service.getCreativesByStatement.return_value = {"results": [
+            Z({"name": "C", "size": Z({"width": 300, "height": 250})})
+        ]}
+        mock_client.get_service.side_effect = lambda name: {
+            "LineItemService": li_service,
+            "LineItemCreativeAssociationService": lica_service,
+            "CreativeService": creative_service,
+        }[name]
+
+        result = verification.verify_line_item_setup(line_item_id=1)
+
+        assert result["status"] == "OK"
+        assert result["creative_associations"][0]["creative_size"] == "300x250"
+
+    @patch("gam_mcp.tools.verification.get_gam_client")
+    def test_delivery_status_reports_delivery_indicator(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_service = MagicMock()
+        mock_service.getLineItemsByStatement.return_value = {"results": [{
+            "id": 1, "name": "LI", "isSetTopBoxEnabled": True,
+            "deliveryIndicator": {"expectedDeliveryPercentage": 75.0, "actualDeliveryPercentage": 2.0},
+        }]}
+        mock_client.get_service.return_value = mock_service
+
+        result = verification.check_line_item_delivery_status(line_item_id=1)
+
+        assert "is_set_to_deliver" not in result
+        assert result["delivery_indicator"] == {
+            "expected_delivery_percentage": 75.0,
+            "actual_delivery_percentage": 2.0,
+        }

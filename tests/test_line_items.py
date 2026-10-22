@@ -326,3 +326,139 @@ class TestListLineItemsByOrder:
         assert result["line_items"][0]["name"] == "LI1"
         assert result["line_items"][0]["impressions_delivered"] == 100
         assert result["line_items"][1]["name"] == "LI2"
+
+
+def _zeep_line_item(**values):
+    """Build a real zeep CompoundValue shaped like a LineItem (no .get() method)."""
+    from zeep import xsd
+
+    money = xsd.ComplexType(xsd.Sequence([
+        xsd.Element("currencyCode", xsd.String()),
+        xsd.Element("microAmount", xsd.Long()),
+    ]))
+    goal = xsd.ComplexType(xsd.Sequence([
+        xsd.Element("goalType", xsd.String()),
+        xsd.Element("unitType", xsd.String()),
+        xsd.Element("units", xsd.Long()),
+    ]))
+    line_item_type = xsd.ComplexType(xsd.Sequence([
+        xsd.Element("id", xsd.Long()),
+        xsd.Element("name", xsd.String()),
+        xsd.Element("orderId", xsd.Long()),
+        xsd.Element("status", xsd.String()),
+        xsd.Element("lineItemType", xsd.String()),
+        xsd.Element("priority", xsd.Integer()),
+        xsd.Element("costType", xsd.String()),
+        xsd.Element("costPerUnit", money),
+        xsd.Element("primaryGoal", goal),
+        xsd.Element("endDateTime", xsd.AnyType()),
+    ]))
+    return line_item_type(**values)
+
+
+class TestUpdateLineItemWithZeepObjects:
+    """update_line_item must work with real zeep responses, not just dicts."""
+
+    @staticmethod
+    def _setup(mock_get_client, existing, updated):
+        mock_client = MagicMock()
+        mock_client.get_time_zone.return_value = "Europe/Vilnius"
+        mock_get_client.return_value = mock_client
+        mock_service = MagicMock()
+        mock_service.getLineItemsByStatement.return_value = {"results": [existing]}
+        mock_service.updateLineItems.return_value = [updated]
+        mock_client.get_service.return_value = mock_service
+        return mock_service
+
+    @patch("gam_mcp.tools.line_items.get_gam_client")
+    def test_name_update_reports_success(self, mock_get_client):
+        existing = _zeep_line_item(id=1, name="Old", orderId=2, status="READY")
+        updated = _zeep_line_item(id=1, name="New", orderId=2, status="READY")
+        assert not hasattr(updated, "get")
+        mock_service = self._setup(mock_get_client, existing, updated)
+
+        result = line_items.update_line_item(line_item_id=1, name="New")
+
+        mock_service.updateLineItems.assert_called_once()
+        assert "error" not in result
+        assert "warning" not in result
+        assert result["name"] == "New"
+
+    @patch("gam_mcp.tools.line_items.get_gam_client")
+    def test_cost_and_goal_update_when_fields_are_empty(self, mock_get_client):
+        existing = _zeep_line_item(id=1, name="LI", costPerUnit=None, primaryGoal=None)
+        updated = _zeep_line_item(
+            id=1, name="LI",
+            costPerUnit={"currencyCode": "EUR", "microAmount": 5000000},
+            primaryGoal={"goalType": "LIFETIME", "unitType": "IMPRESSIONS", "units": 1000},
+        )
+        mock_service = self._setup(mock_get_client, existing, updated)
+
+        result = line_items.update_line_item(
+            line_item_id=1, cost_per_unit_micro=5000000, currency_code="EUR", goal_impressions=1000
+        )
+
+        sent = mock_service.updateLineItems.call_args.args[0][0]
+        assert sent["costPerUnit"] == {"microAmount": 5000000, "currencyCode": "EUR"}
+        assert sent["primaryGoal"]["units"] == 1000
+        assert result["cost_per_unit_micro"] == 5000000
+        assert result["currency_code"] == "EUR"
+        assert result["goal_impressions"] == 1000
+
+    @patch("gam_mcp.tools.line_items.get_gam_client")
+    def test_cost_update_on_existing_zeep_money(self, mock_get_client):
+        existing = _zeep_line_item(id=1, costPerUnit={"currencyCode": "EUR", "microAmount": 1})
+        updated = _zeep_line_item(id=1, costPerUnit={"currencyCode": "EUR", "microAmount": 2})
+        mock_service = self._setup(mock_get_client, existing, updated)
+
+        result = line_items.update_line_item(line_item_id=1, cost_per_unit_micro=2)
+
+        assert "costPerUnit.microAmount: 1 -> 2" in result["changes"]
+        assert mock_service.updateLineItems.call_args.args[0][0].costPerUnit.microAmount == 2
+
+    @patch("gam_mcp.tools.line_items.get_gam_client")
+    def test_formatting_failure_after_update_is_not_reported_as_failure(self, mock_get_client):
+        existing = _zeep_line_item(id=1, name="Old")
+
+        class Unreadable:
+            def __getattr__(self, name):
+                raise RuntimeError("cannot read")
+
+        self._setup(mock_get_client, existing, Unreadable())
+
+        result = line_items.update_line_item(line_item_id=1, name="New")
+
+        assert "error" not in result
+        assert "do not retry" in result["warning"]
+        assert result["changes"] == ["name: 'Old' -> 'New'"]
+
+    @patch("gam_mcp.tools.line_items.get_gam_client")
+    def test_end_date_uses_network_time_zone(self, mock_get_client):
+        existing = _zeep_line_item(id=1, name="LI")
+        mock_service = self._setup(mock_get_client, existing, _zeep_line_item(id=1))
+
+        line_items.update_line_item(line_item_id=1, end_year=2026, end_month=12, end_day=31)
+
+        sent = mock_service.updateLineItems.call_args.args[0][0]
+        assert sent["endDateTime"]["timeZoneId"] == "Europe/Vilnius"
+
+
+class TestCreateLineItemTimeZone:
+    """create_line_item must use the network's own time zone."""
+
+    @patch("gam_mcp.tools.line_items.get_gam_client")
+    def test_uses_network_time_zone(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.get_time_zone.return_value = "Europe/Vilnius"
+        mock_get_client.return_value = mock_client
+        mock_service = MagicMock()
+        mock_service.createLineItems.return_value = [{"id": 1, "name": "LI"}]
+        mock_client.get_service.return_value = mock_service
+
+        line_items.create_line_item(
+            order_id=1, name="LI", end_year=2026, end_month=12, end_day=31,
+            target_ad_unit_id="42",
+        )
+
+        sent = mock_service.createLineItems.call_args.args[0][0]
+        assert sent["endDateTime"]["timeZoneId"] == "Europe/Vilnius"

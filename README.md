@@ -70,9 +70,15 @@ The server uses environment variables for configuration:
 | `GAM_CREDENTIALS_PATH` | Path to service account JSON | **Yes** |
 | `GAM_NETWORK_CODES` | Comma-separated list of GAM network codes (first is the default) | **Yes** |
 | `GAM_MCP_TRANSPORT` | Transport mode: `stdio` or `http` | No (default: `stdio`) |
-| `GAM_MCP_HOST` | Server host (HTTP mode only) | No (default: `0.0.0.0`) |
+| `GAM_MCP_HOST` | Server host (HTTP mode only) | No (default: `127.0.0.1`) |
 | `GAM_MCP_PORT` | Server port (HTTP mode only) | No (default: `8000`) |
-| `GAM_MCP_AUTH_TOKEN` | Authentication token (HTTP mode only) | No (auto-generated if not set) |
+| `GAM_MCP_AUTH_TOKEN` | Bearer token, at least 32 characters (HTTP mode only) | **Yes in HTTP mode** (the server refuses to start without it) |
+| `GAM_UPLOAD_DIR` | Directory that upload tools may read creative images from | Only for upload tools |
+| `GAM_API_VERSION` | Override the Ad Manager SOAP API version (default `v202608`) | No |
+
+### Creative Uploads
+
+Upload tools (`upload_creative`, `upload_and_associate_creative`, `bulk_upload_creatives`, `create_campaign`) only read files inside `GAM_UPLOAD_DIR`. Relative paths are resolved against that directory, symlinks that point outside it are refused, and only regular PNG, JPEG or GIF files up to 10 MB are accepted. Point it at a dedicated folder that holds nothing but creatives — never your home directory or a folder containing credentials.
 
 ### Multi-Network Support
 
@@ -101,26 +107,19 @@ For Claude Code MCP configuration:
 
 ## Authentication
 
-The server implements Bearer token authentication using [FastMCP native middleware](https://gofastmcp.com/python-sdk/fastmcp-server-auth-auth), following [MCP security best practices](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices).
+The local **stdio** transport (the default) runs as a child process of your MCP client and needs no token. Prefer it for single-user use.
 
-### Security Features
+The **HTTP** transport always requires a bearer token:
 
-- **FastMCP Native Middleware**: Uses FastMCP 2.x middleware for proper MCP lifecycle management
-- **Cryptographically secure tokens**: Generated using `secrets.token_hex(32)`
-- **Timing attack prevention**: Uses constant-time comparison (`hmac.compare_digest`)
-- **Tool-level authentication**: Auth validated on every tool call
-- **Audit logging**: All authentication failures logged
+- The server refuses to start in HTTP mode unless `GAM_MCP_AUTH_TOKEN` is set to at least 32 characters. Empty or whitespace values are rejected, so an unset secret in deployment config cannot silently disable authentication.
+- Every HTTP request — including MCP initialization and session requests — is checked at the ASGI layer before FastMCP handles it; requests without a valid token get `401`.
+- Tool calls are checked again by FastMCP middleware as defense in depth. Both checks fail closed and use constant-time comparison (`hmac.compare_digest`).
+- The token is never written to logs. Provision it from a secret manager.
+- The HTTP host defaults to `127.0.0.1`. Bind to other interfaces only behind TLS and network access controls.
 
-### How It Works
-
-Authentication is enforced at the tool level using FastMCP's middleware system:
-- When a tool is called, the middleware validates the `Authorization` header
-- If no token is configured (`GAM_MCP_AUTH_TOKEN` not set), requests are allowed
-- Invalid or missing tokens return a `ToolError` with a helpful message
+All authenticated callers share the same service account and its Ad Manager permissions. There is no per-user or per-tool authorization, so give the service account the minimum role it needs.
 
 ### Setup
-
-For remote deployments, set a fixed authentication token:
 
 ```bash
 # Generate a secure token
@@ -128,9 +127,8 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 # Set it as environment variable
 export GAM_MCP_AUTH_TOKEN="your-generated-token"
+export GAM_MCP_TRANSPORT=http
 ```
-
-If not set, a random token is generated at startup and displayed in the logs.
 
 Clients must include the token in the Authorization header:
 ```
@@ -141,7 +139,7 @@ Authorization: Bearer your-generated-token
 
 | Endpoint | Description |
 |----------|-------------|
-| `/mcp` | MCP protocol endpoint (auth validated on tool calls) |
+| `/mcp` | MCP protocol endpoint (every request requires a bearer token in HTTP mode) |
 
 ## Running the Server
 
@@ -154,13 +152,18 @@ gam-mcp
 # Or directly with Python
 python -m gam_mcp.server
 
-# With custom configuration
-GAM_NETWORK_CODE=12345678 GAM_MCP_PORT=9000 gam-mcp
+# HTTP mode on a custom port
+GAM_NETWORK_CODES=12345678 GAM_MCP_TRANSPORT=http GAM_MCP_PORT=9000 \
+  GAM_MCP_AUTH_TOKEN="your-generated-token" gam-mcp
 ```
 
 ### Docker Deployment
 
-The Docker image runs as a non-root user (`appuser`) for security.
+The image runs the server's native HTTP transport (no proxy) as an unprivileged user (UID `10001`). It contains only the installed virtualenv: no source checkout, build tools or credentials. The build context is restricted by `.dockerignore`, and dependencies are installed from the committed `uv.lock`.
+
+Defaults inside the image: `GAM_MCP_TRANSPORT=http`, `GAM_MCP_HOST=0.0.0.0`, `GAM_MCP_PORT=8000`, `GAM_CREDENTIALS_PATH=/run/secrets/gam-credentials.json`, `GAM_UPLOAD_DIR=/uploads`.
+
+Keep the service account key **outside** the repository. The mounted key must be readable by UID `10001` (for example `chown 10001 key.json && chmod 400 key.json` on Linux, or use Docker/Compose secrets).
 
 #### Build the Image
 
@@ -171,75 +174,61 @@ docker build -t google-ad-manager-mcp .
 #### Run the Container
 
 ```bash
-# Basic usage with credentials mounted
 docker run -d \
   --name gam-mcp \
-  -p 8000:8000 \
-  -v /path/to/your/credentials.json:/app/credentials.json:ro \
-  -e GAM_NETWORK_CODE=YOUR_NETWORK_CODE \
-  google-ad-manager-mcp
-
-# With authentication token (recommended for production)
-docker run -d \
-  --name gam-mcp \
-  -p 8000:8000 \
-  -v /path/to/your/credentials.json:/app/credentials.json:ro \
-  -e GAM_NETWORK_CODE=YOUR_NETWORK_CODE \
-  -e GAM_MCP_AUTH_TOKEN=$(python -c "import secrets; print(secrets.token_hex(32))") \
-  google-ad-manager-mcp
-
-# With custom port
-docker run -d \
-  --name gam-mcp \
-  -p 9000:8000 \
-  -v /path/to/your/credentials.json:/app/credentials.json:ro \
-  -e GAM_NETWORK_CODE=YOUR_NETWORK_CODE \
-  -e GAM_MCP_PORT=8000 \
+  -p 127.0.0.1:8000:8000 \
+  --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --memory 512m --pids-limit 128 \
+  -v /secure/path/gam-key.json:/run/secrets/gam-credentials.json:ro \
+  -v /path/to/creatives:/uploads:ro \
+  -e GAM_NETWORK_CODES=YOUR_NETWORK_CODE \
+  -e GAM_MCP_AUTH_TOKEN \
   google-ad-manager-mcp
 ```
 
-#### View Logs
-
-```bash
-# View startup logs (includes generated auth token if not set)
-docker logs gam-mcp
-
-# Follow logs
-docker logs -f gam-mcp
-```
+`-e GAM_MCP_AUTH_TOKEN` without a value passes the token from your shell environment instead of putting it on the command line. The container exits immediately if the token is missing or shorter than 32 characters. Publish the port on `127.0.0.1` unless TLS and network access controls sit in front of it.
 
 #### Docker Compose
 
-Create a `docker-compose.yml` file:
-
 ```yaml
-version: '3.8'
 services:
   gam-mcp:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 128
     volumes:
-      - ./credentials.json:/app/credentials.json:ro
+      - /path/to/creatives:/uploads:ro
+    secrets:
+      - gam-credentials.json
     environment:
-      - GAM_NETWORK_CODE=YOUR_NETWORK_CODE
-      - GAM_MCP_AUTH_TOKEN=your-secure-token
+      - GAM_NETWORK_CODES=YOUR_NETWORK_CODE
+      - GAM_MCP_AUTH_TOKEN  # taken from the shell / .env, never committed
     restart: unless-stopped
-```
 
-Run with:
-```bash
-docker-compose up -d
+secrets:
+  gam-credentials.json:
+    file: /secure/path/gam-key.json
 ```
 
 #### Verify the Container
 
 ```bash
-# Check container is running
-docker ps
+# Without a token: 401 Unauthorized
+curl -i -X POST http://localhost:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc": "2.0", "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}}, "id": 1}'
 
-# Test the endpoint
-curl -X POST http://localhost:8000/mcp \
+# With the token: 200 OK
+curl -i -X POST http://localhost:8000/mcp \
+  -H "Authorization: Bearer $GAM_MCP_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc": "2.0", "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}}, "id": 1}'
@@ -247,28 +236,29 @@ curl -X POST http://localhost:8000/mcp \
 
 ### Cloud Deployment (Railway, Fly.io, etc.)
 
-1. Set environment variables in your cloud provider:
-   - `GAM_CREDENTIALS_PATH`: Path to credentials (or use secrets)
-   - `GAM_NETWORK_CODE`: Your Ad Manager network code
-   - `GAM_MCP_AUTH_TOKEN`: A secure authentication token
+1. Set environment variables in your cloud provider's secret store:
+   - `GAM_CREDENTIALS_PATH`: Path where the platform mounts the key secret
+   - `GAM_NETWORK_CODES`: Your Ad Manager network code(s)
+   - `GAM_MCP_AUTH_TOKEN`: A random token of at least 32 characters
 
-2. Deploy using the included Dockerfile
+2. Deploy using the included Dockerfile behind TLS, and restrict who can reach the endpoint.
 
 ## Connecting to AI Assistants
 
 ### Claude Desktop (uvx - Recommended)
 
-The easiest way to use this server with Claude Desktop. Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+The easiest way to use this server with Claude Desktop. Pin the version you have reviewed (`google-ad-manager-mcp==X.Y.Z`) rather than running whatever is latest on PyPI. Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "google-ad-manager": {
       "command": "uvx",
-      "args": ["google-ad-manager-mcp"],
+      "args": ["google-ad-manager-mcp==0.1.14"],
       "env": {
         "GAM_CREDENTIALS_PATH": "/path/to/your/credentials.json",
-        "GAM_NETWORK_CODE": "YOUR_NETWORK_CODE"
+        "GAM_NETWORK_CODES": "YOUR_NETWORK_CODE",
+        "GAM_UPLOAD_DIR": "/path/to/creatives"
       }
     }
   }
@@ -286,35 +276,23 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "-e", "GAM_NETWORK_CODE",
-        "-v", "/path/to/credentials.json:/app/credentials.json:ro",
+        "-e", "GAM_MCP_TRANSPORT=stdio",
+        "-e", "GAM_NETWORK_CODES",
+        "-v", "/secure/path/gam-key.json:/run/secrets/gam-credentials.json:ro",
+        "-v", "/path/to/creatives:/uploads:ro",
         "google-ad-manager-mcp"
       ],
       "env": {
-        "GAM_NETWORK_CODE": "YOUR_NETWORK_CODE"
+        "GAM_NETWORK_CODES": "YOUR_NETWORK_CODE"
       }
     }
   }
 }
 ```
 
-### Claude Desktop (HTTP Mode)
+### HTTP Mode
 
-If running the server in HTTP mode:
-
-```json
-{
-  "mcpServers": {
-    "google-ad-manager": {
-      "url": "http://localhost:8000/mcp"
-    }
-  }
-}
-```
-
-### Remote Server with Authentication
-
-If deploying remotely with authentication enabled:
+HTTP mode always requires the bearer token. Use `https://` for anything other than localhost:
 
 ```json
 {
@@ -343,12 +321,13 @@ Refer to each client's documentation for MCP server configuration.
 ### Testing with MCP Inspector
 
 ```bash
-# Without authentication
-npx @modelcontextprotocol/inspector http://localhost:8000/mcp
+# Stdio (no token needed)
+npx @modelcontextprotocol/inspector gam-mcp
 
-# With authentication (set header in Inspector UI)
+# HTTP: set the header in the Inspector UI
 # Header: Authorization
 # Value: Bearer your-token
+npx @modelcontextprotocol/inspector http://localhost:8000/mcp
 ```
 
 ## Available Tools
@@ -523,7 +502,7 @@ See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## API Version
 
-Uses Google Ad Manager SOAP API version `v202502`.
+Uses Google Ad Manager SOAP API version `v202608` by default (supported until August 2027). Override it with `GAM_API_VERSION`; the server refuses to start with a version the installed `googleads` library does not support.
 
 ## License
 

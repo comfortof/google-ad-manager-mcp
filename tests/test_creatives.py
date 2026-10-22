@@ -1,10 +1,10 @@
 """Tests for creative tools."""
 
 import pytest
-from unittest.mock import patch, MagicMock, mock_open
-from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 from gam_mcp.tools import creatives
+from tests.conftest import make_png
 
 
 class TestExtractSizeFromFilename:
@@ -44,34 +44,35 @@ class TestExtractSizeFromFilename:
 class TestUploadCreative:
     """Tests for upload_creative function."""
 
-    @patch("gam_mcp.tools.creatives.get_gam_client")
-    @patch("gam_mcp.tools.creatives.Path")
-    def test_returns_error_when_file_not_found(self, mock_path_class, mock_get_client):
-        """Test returns error when file doesn't exist."""
-        mock_path = MagicMock()
-        mock_path.exists.return_value = False
-        mock_path_class.return_value = mock_path
+    @staticmethod
+    def _mock_service(mock_get_client, name="Creative - 300x250 - banner_300x250"):
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_service = MagicMock()
+        mock_service.createCreatives.return_value = [{"id": 123, "name": name}]
+        mock_client.get_service.return_value = mock_service
+        return mock_service
 
+    @patch("gam_mcp.tools.creatives.get_gam_client")
+    def test_returns_error_when_file_not_found(self, mock_get_client, upload_dir):
+        """Test returns error when file doesn't exist."""
         result = creatives.upload_creative(
-            file_path="/path/to/missing.png",
+            file_path="missing_300x250.png",
             advertiser_id=123,
             click_through_url="https://example.com"
         )
 
         assert "error" in result
         assert "not found" in result["error"]
+        mock_get_client.assert_not_called()
 
     @patch("gam_mcp.tools.creatives.get_gam_client")
-    @patch("gam_mcp.tools.creatives.Path")
-    def test_returns_error_when_size_not_in_filename(self, mock_path_class, mock_get_client):
+    def test_returns_error_when_size_not_in_filename(self, mock_get_client, upload_dir):
         """Test returns error when size cannot be extracted from filename."""
-        mock_path = MagicMock()
-        mock_path.exists.return_value = True
-        mock_path.name = "banner.png"
-        mock_path_class.return_value = mock_path
+        (upload_dir / "banner.png").write_bytes(make_png())
 
         result = creatives.upload_creative(
-            file_path="/path/to/banner.png",
+            file_path="banner.png",
             advertiser_id=123,
             click_through_url="https://example.com"
         )
@@ -80,28 +81,13 @@ class TestUploadCreative:
         assert "Could not extract size" in result["error"]
 
     @patch("gam_mcp.tools.creatives.get_gam_client")
-    @patch("builtins.open", new_callable=mock_open, read_data=b"fake image data")
-    @patch("gam_mcp.tools.creatives.Path")
-    def test_uploads_creative_successfully(self, mock_path_class, mock_file, mock_get_client):
+    def test_uploads_creative_successfully(self, mock_get_client, upload_dir):
         """Test successfully uploads a creative."""
-        mock_path = MagicMock()
-        mock_path.exists.return_value = True
-        mock_path.name = "banner_300x250.png"
-        mock_path.stem = "banner_300x250"
-        mock_path_class.return_value = mock_path
-
-        mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
-
-        mock_service = MagicMock()
-        mock_service.createCreatives.return_value = [{
-            "id": 123,
-            "name": "Creative - 300x250 - banner_300x250"
-        }]
-        mock_client.get_service.return_value = mock_service
+        (upload_dir / "banner_300x250.png").write_bytes(make_png())
+        mock_service = self._mock_service(mock_get_client)
 
         result = creatives.upload_creative(
-            file_path="/path/to/banner_300x250.png",
+            file_path="banner_300x250.png",
             advertiser_id=456,
             click_through_url="https://example.com"
         )
@@ -109,30 +95,31 @@ class TestUploadCreative:
         assert result["id"] == 123
         assert result["size"] == "300x250"
         assert "uploaded successfully" in result["message"]
+        mock_service.createCreatives.assert_called_once()
 
     @patch("gam_mcp.tools.creatives.get_gam_client")
-    @patch("builtins.open", new_callable=mock_open, read_data=b"fake image data")
-    @patch("gam_mcp.tools.creatives.Path")
-    def test_uses_size_override(self, mock_path_class, mock_file, mock_get_client):
-        """Test uses size override when provided."""
-        mock_path = MagicMock()
-        mock_path.exists.return_value = True
-        mock_path.name = "banner_970x250.png"
-        mock_path.stem = "banner_970x250"
-        mock_path_class.return_value = mock_path
-
-        mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
-
-        mock_service = MagicMock()
-        mock_service.createCreatives.return_value = [{
-            "id": 123,
-            "name": "Creative - 1000x250 - banner_970x250"
-        }]
-        mock_client.get_service.return_value = mock_service
+    def test_accepts_absolute_path_inside_upload_dir(self, mock_get_client, upload_dir):
+        """Test absolute paths inside the upload directory are accepted."""
+        path = upload_dir / "banner_300x250.png"
+        path.write_bytes(make_png())
+        self._mock_service(mock_get_client)
 
         result = creatives.upload_creative(
-            file_path="/path/to/banner_970x250.png",
+            file_path=str(path),
+            advertiser_id=456,
+            click_through_url="https://example.com"
+        )
+
+        assert result["id"] == 123
+
+    @patch("gam_mcp.tools.creatives.get_gam_client")
+    def test_uses_size_override(self, mock_get_client, upload_dir):
+        """Test uses size override when provided."""
+        (upload_dir / "banner_970x250.png").write_bytes(make_png(970, 250))
+        self._mock_service(mock_get_client, name="Creative - 1000x250 - banner_970x250")
+
+        result = creatives.upload_creative(
+            file_path="banner_970x250.png",
             advertiser_id=456,
             click_through_url="https://example.com",
             override_size_width=1000,
@@ -142,6 +129,88 @@ class TestUploadCreative:
         assert result["size"] == "1000x250"
         assert result["original_size"] == "970x250"
         assert result["override_size"] is True
+
+    @patch("gam_mcp.tools.creatives.get_gam_client")
+    def test_rejects_when_upload_dir_not_configured(self, mock_get_client, tmp_path, monkeypatch):
+        """Test uploads are refused when GAM_UPLOAD_DIR is not set."""
+        monkeypatch.delenv("GAM_UPLOAD_DIR", raising=False)
+        path = tmp_path / "banner_300x250.png"
+        path.write_bytes(make_png())
+
+        result = creatives.upload_creative(
+            file_path=str(path),
+            advertiser_id=456,
+            click_through_url="https://example.com"
+        )
+
+        assert "GAM_UPLOAD_DIR" in result["error"]
+        mock_get_client.assert_not_called()
+
+    @patch("gam_mcp.tools.creatives.get_gam_client")
+    def test_rejects_path_outside_upload_dir(self, mock_get_client, upload_dir, tmp_path):
+        """Test absolute and ../ paths outside the upload directory are refused."""
+        outside = tmp_path / "secret_300x250.png"
+        outside.write_bytes(make_png())
+
+        for file_path in (str(outside), "../secret_300x250.png"):
+            result = creatives.upload_creative(
+                file_path=file_path,
+                advertiser_id=456,
+                click_through_url="https://example.com"
+            )
+            assert "outside the upload directory" in result["error"]
+        mock_get_client.assert_not_called()
+
+    @patch("gam_mcp.tools.creatives.get_gam_client")
+    def test_rejects_symlink_escaping_upload_dir(self, mock_get_client, upload_dir, tmp_path):
+        """Test a symlink inside the upload directory pointing outside is refused."""
+        secret = tmp_path / "credentials.json"
+        secret.write_text('{"private_key": "not-real"}')
+        (upload_dir / "banner_300x250.png").symlink_to(secret)
+
+        result = creatives.upload_creative(
+            file_path="banner_300x250.png",
+            advertiser_id=456,
+            click_through_url="https://example.com"
+        )
+
+        assert "outside the upload directory" in result["error"]
+        mock_get_client.assert_not_called()
+
+    @patch("gam_mcp.tools.creatives.get_gam_client")
+    def test_rejects_non_image_content(self, mock_get_client, upload_dir):
+        """Test files that are not real images are refused."""
+        (upload_dir / "banner_300x250.png").write_text("PRIVATE KEY")
+
+        result = creatives.upload_creative(
+            file_path="banner_300x250.png",
+            advertiser_id=456,
+            click_through_url="https://example.com"
+        )
+
+        assert "not a PNG, JPEG or GIF" in result["error"]
+        mock_get_client.assert_not_called()
+
+    @patch("gam_mcp.tools.creatives.get_gam_client")
+    def test_rejects_directory_and_oversized_file(self, mock_get_client, upload_dir):
+        """Test directories and files over the size limit are refused."""
+        (upload_dir / "dir_300x250.png").mkdir()
+        result = creatives.upload_creative(
+            file_path="dir_300x250.png",
+            advertiser_id=456,
+            click_through_url="https://example.com"
+        )
+        assert "Not a regular file" in result["error"]
+
+        big = upload_dir / "big_300x250.png"
+        big.write_bytes(make_png() + b"\x00" * creatives.MAX_UPLOAD_BYTES)
+        result = creatives.upload_creative(
+            file_path="big_300x250.png",
+            advertiser_id=456,
+            click_through_url="https://example.com"
+        )
+        assert "limit" in result["error"]
+        mock_get_client.assert_not_called()
 
 
 class TestAssociateCreativeWithLineItem:
@@ -270,20 +339,18 @@ class TestUploadAndAssociateCreative:
         )
 
         assert "association_error" in result
+        # Must look like a failure to callers that check for "error"
+        assert "error" in result
+        assert result["creative_id"] == 123
 
 
 class TestBulkUploadCreatives:
     """Tests for bulk_upload_creatives function."""
 
-    @patch("gam_mcp.tools.creatives.Path")
-    def test_returns_error_when_folder_not_found(self, mock_path_class):
+    def test_returns_error_when_folder_not_found(self, upload_dir):
         """Test returns error when folder doesn't exist."""
-        mock_path = MagicMock()
-        mock_path.exists.return_value = False
-        mock_path_class.return_value = mock_path
-
         result = creatives.bulk_upload_creatives(
-            folder_path="/missing/folder",
+            folder_path="missing",
             advertiser_id=123,
             line_item_id=456,
             click_through_url="https://example.com"
@@ -292,16 +359,23 @@ class TestBulkUploadCreatives:
         assert "error" in result
         assert "not found" in result["error"]
 
-    @patch("gam_mcp.tools.creatives.Path")
-    def test_returns_error_when_no_images_found(self, mock_path_class):
+    def test_returns_error_when_folder_outside_upload_dir(self, upload_dir, tmp_path):
+        """Test refuses folders outside the upload directory."""
+        result = creatives.bulk_upload_creatives(
+            folder_path=str(tmp_path),
+            advertiser_id=123,
+            line_item_id=456,
+            click_through_url="https://example.com"
+        )
+
+        assert "outside the upload directory" in result["error"]
+
+    def test_returns_error_when_no_images_found(self, upload_dir):
         """Test returns error when folder has no images."""
-        mock_path = MagicMock()
-        mock_path.exists.return_value = True
-        mock_path.glob.return_value = []
-        mock_path_class.return_value = mock_path
+        (upload_dir / "empty").mkdir()
 
         result = creatives.bulk_upload_creatives(
-            folder_path="/empty/folder",
+            folder_path="empty",
             advertiser_id=123,
             line_item_id=456,
             click_through_url="https://example.com"
@@ -311,31 +385,11 @@ class TestBulkUploadCreatives:
         assert "No image files" in result["error"]
 
     @patch("gam_mcp.tools.creatives.upload_and_associate_creative")
-    @patch("gam_mcp.tools.creatives.Path")
-    def test_uploads_all_images_successfully(self, mock_path_class, mock_upload_assoc):
+    def test_uploads_all_images_successfully(self, mock_upload_assoc, upload_dir):
         """Test uploads all images from folder."""
-        mock_path = MagicMock()
-        mock_path.exists.return_value = True
-
-        # Create mock files with proper Path behavior for sorting
-        mock_file1 = MagicMock(spec=Path)
-        mock_file1.name = "banner_300x250.png"
-        mock_file1.__str__ = lambda x: "/images/banner_300x250.png"
-        mock_file1.__lt__ = lambda self, other: str(self) < str(other)
-
-        mock_file2 = MagicMock(spec=Path)
-        mock_file2.name = "banner_728x90.png"
-        mock_file2.__str__ = lambda x: "/images/banner_728x90.png"
-        mock_file2.__lt__ = lambda self, other: str(self) < str(other)
-
-        # Only return files for lowercase pattern to avoid duplicates
-        def mock_glob(pattern):
-            if pattern == "*.png":
-                return [mock_file1, mock_file2]
-            return []
-
-        mock_path.glob.side_effect = mock_glob
-        mock_path_class.return_value = mock_path
+        (upload_dir / "banner_300x250.png").write_bytes(make_png())
+        (upload_dir / "banner_728x90.PNG").write_bytes(make_png(728, 90))
+        (upload_dir / "notes.txt").write_text("ignored")
 
         mock_upload_assoc.return_value = {
             "creative_id": 123,
@@ -344,7 +398,7 @@ class TestBulkUploadCreatives:
         }
 
         result = creatives.bulk_upload_creatives(
-            folder_path="/images",
+            folder_path=".",
             advertiser_id=123,
             line_item_id=456,
             click_through_url="https://example.com"
@@ -352,6 +406,49 @@ class TestBulkUploadCreatives:
 
         assert result["success_count"] == 2
         assert result["fail_count"] == 0
+        assert result["success"] is True
+
+    @patch("gam_mcp.tools.creatives.upload_and_associate_creative")
+    def test_reports_association_failure_as_failed(self, mock_upload_assoc, upload_dir):
+        """Test an upload whose association failed is reported, not treated as success."""
+        (upload_dir / "banner_300x250.png").write_bytes(make_png())
+        mock_upload_assoc.return_value = {
+            "error": "Creative 99 uploaded but association failed: boom",
+            "creative_id": 99,
+            "association_error": "boom",
+        }
+
+        result = creatives.bulk_upload_creatives(
+            folder_path=".",
+            advertiser_id=123,
+            line_item_id=456,
+            click_through_url="https://example.com"
+        )
+
+        assert result["success"] is False
+        assert result["fail_count"] == 1
+        assert result["failed"][0]["creative_id"] == 99
+
+    @patch("gam_mcp.tools.creatives.upload_and_associate_creative")
+    def test_api_exception_is_reported_per_file(self, mock_upload_assoc, upload_dir):
+        """Test an API exception for one file does not abort the batch."""
+        (upload_dir / "a_300x250.png").write_bytes(make_png())
+        (upload_dir / "b_728x90.png").write_bytes(make_png(728, 90))
+        mock_upload_assoc.side_effect = [
+            RuntimeError("API fault"),
+            {"creative_id": 2, "size": "728x90"},
+        ]
+
+        result = creatives.bulk_upload_creatives(
+            folder_path=".",
+            advertiser_id=123,
+            line_item_id=456,
+            click_through_url="https://example.com"
+        )
+
+        assert result["success_count"] == 1
+        assert result["failed"] == [{"file": "a_300x250.png", "error": "API fault"}]
+        assert result["success"] is False
 
 
 class TestGetCreative:
