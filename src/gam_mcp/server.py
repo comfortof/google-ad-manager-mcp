@@ -27,7 +27,7 @@ from fastmcp.exceptions import ToolError
 from starlette.middleware import Middleware as ASGIMiddleware
 
 from .client import init_gam_client, get_gam_client, is_gam_client_initialized
-from .tools import orders, line_items, creatives, advertisers, verification, reporting
+from .tools import orders, line_items, creatives, advertisers, verification, reporting, delivery
 from .uploads import UploadError
 
 # Authentication state - populated by main() when running with HTTP transport.
@@ -975,6 +975,37 @@ def check_line_item_delivery_status(line_item_id: int, network_code: Optional[st
     """
     init_client()
     result = verification.check_line_item_delivery_status(line_item_id=line_item_id, network_code=network_code)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_delivery_progress(
+    order_id: Optional[int] = None,
+    behind_threshold_pts: float = 10,
+    network_code: Optional[str] = None,
+) -> str:
+    """Report actual vs expected delivery and flag line items behind schedule.
+
+    Read-only. Returns the Ad Manager UI "Progress" bar as numbers for every
+    delivering line item, using GAM's own delivery indicator.
+
+    Args:
+        order_id: Optional order ID. If omitted, covers all delivering line items in the network.
+        behind_threshold_pts: Flag a line item as behind when expected minus actual
+            delivery is at least this many percentage points (default 10).
+        network_code: Optional GAM network code to target a specific network.
+            If not provided, uses the default network.
+
+    Returns per line item: name, ID, goal, delivered, actual %, expected %,
+    gap in points and behind true/false, furthest behind first. Line items
+    without a quantity goal are reported as "no goal".
+    """
+    init_client()
+    result = delivery.get_delivery_progress(
+        order_id=order_id,
+        behind_threshold_pts=behind_threshold_pts,
+        network_code=network_code,
+    )
     return json.dumps(result, indent=2)
 
 

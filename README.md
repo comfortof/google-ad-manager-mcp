@@ -386,6 +386,7 @@ npx @modelcontextprotocol/inspector http://localhost:8000/mcp
 |------|-------------|
 | `verify_line_item_setup` | Verify line item configuration |
 | `check_line_item_delivery_status` | Check delivery progress |
+| `get_delivery_progress` | Actual vs expected delivery for delivering line items, flags those behind |
 | `verify_order_setup` | Verify entire order setup |
 
 ### Reporting Tools
