@@ -58,6 +58,9 @@ docs/_build/
 *.log
 logs/
 
+# Campaign evidence screenshots (client data)
+evidence/
+
 # Environment and secrets
 .env
 .env.*

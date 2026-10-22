@@ -52,6 +52,7 @@ Instead, send a detailed report to: **youssef@matious.com**
 - Use HTTPS and network access controls for remote deployments; the HTTP host defaults to `127.0.0.1`
 - The Docker image runs as an unprivileged user (UID 10001); also run it with `--read-only`, `--cap-drop ALL`, `no-new-privileges` and resource limits
 - Point `GAM_UPLOAD_DIR` at a dedicated folder containing only creatives
+- Set `GAM_EVIDENCE_ALLOWED_HOSTS` to your own sites when running HTTP mode, so callers cannot point the screenshot browser at arbitrary pages
 - Pin the package version and build from the committed `uv.lock`
 
 ### Google Ad Manager Permissions
@@ -71,6 +72,7 @@ This project implements several security measures:
 - **Constant-Time Comparison**: Prevents timing attacks on token validation
 - **Parameterized Queries**: All GAM API queries use bind variables to prevent injection
 - **Read-Only Mode**: `GAM_READ_ONLY=true` disables every tool that changes Ad Manager; unrecognised values refuse to start
+- **Screenshot Browser Limits**: `capture_campaign_screenshots` only opens public `http(s)` host names (no IP addresses, `localhost` or `.local`/`.internal` hosts), optionally restricted by `GAM_EVIDENCE_ALLOWED_HOSTS`, and writes only under `GAM_EVIDENCE_DIR` using numeric IDs as path names
 - **Upload Sandbox**: Upload tools only read regular image files inside `GAM_UPLOAD_DIR`, with size limits and image validation
 - **Non-Root Docker**: Container runs as an unprivileged user with no source tree or build tools
 - **Audit Logging**: Failed authentication attempts are logged (tokens are never logged)

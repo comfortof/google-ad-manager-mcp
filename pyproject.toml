@@ -53,6 +53,9 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.8.0",
 ]
+screenshots = [
+    "playwright>=1.50,<2",
+]
 
 [project.scripts]
 gam-mcp = "gam_mcp.server:main"

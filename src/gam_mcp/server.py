@@ -27,7 +27,7 @@ from fastmcp.exceptions import ToolError
 from starlette.middleware import Middleware as ASGIMiddleware
 
 from .client import init_gam_client, get_gam_client, is_gam_client_initialized
-from .tools import orders, line_items, creatives, advertisers, verification, reporting, delivery
+from .tools import orders, line_items, creatives, advertisers, verification, reporting, delivery, screenshots
 from .uploads import UploadError
 
 # Authentication state - populated by main() when running with HTTP transport.
@@ -1012,6 +1012,55 @@ def get_delivery_progress(
         order_id=order_id,
         behind_threshold_pts=behind_threshold_pts,
         network_code=network_code,
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def capture_campaign_screenshots(
+    ctx: Context,
+    order_id: Optional[int] = None,
+    line_item_id: Optional[int] = None,
+    site_url: Optional[str] = None,
+    site_urls: Optional[dict[str, str]] = None,
+    viewports: Optional[list[str]] = None,
+    network_code: Optional[str] = None,
+) -> str:
+    """Take agency evidence screenshots, one per creative, on a real page.
+
+    Read-only in Ad Manager. Each active creative is forced into its slot with
+    a preview URL, so rotating banners need no refreshing. Saves a full-page and
+    a slot-only PNG per creative and viewport, plus one combined PDF, under
+    GAM_EVIDENCE_DIR/<order>/<line item>/. Takes several seconds per capture.
+
+    Args:
+        order_id: Capture every line item of this order. Pass this or line_item_id.
+        line_item_id: Capture a single line item.
+        site_url: Page that carries the ad unit, used for every size not in
+            site_urls. Defaults to GAM_EVIDENCE_SITE_URL.
+        site_urls: Page per creative size, e.g. {"300x250": "https://...", "728x90": "https://..."}.
+        viewports: Any of "desktop" (1440 px) and "mobile" (390 px). Default: both.
+        network_code: Optional GAM network code to target a specific network.
+            If not provided, uses the default network.
+
+    Limits: the page must request the same ad unit and size; key-values and
+    geo targeting are ignored in preview; SafeFrame and interstitial creatives
+    are not supported. Returns the files written and, per capture, whether the
+    creative's slot was found.
+    """
+    init_client()
+
+    async def report_progress(done: int, total: int) -> None:
+        await ctx.report_progress(done, total)
+
+    result = await screenshots.capture_campaign_screenshots(
+        order_id=order_id,
+        line_item_id=line_item_id,
+        site_url=site_url,
+        site_urls=site_urls,
+        viewports=viewports,
+        network_code=network_code,
+        on_progress=report_progress,
     )
     return json.dumps(result, indent=2)
 
