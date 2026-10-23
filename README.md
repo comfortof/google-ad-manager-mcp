@@ -76,9 +76,7 @@ The server uses environment variables for configuration:
 | `GAM_UPLOAD_DIR` | Directory that upload tools may read creative images from | Only for upload tools |
 | `GAM_API_VERSION` | Override the Ad Manager SOAP API version (default `v202608`) | No |
 | `GAM_READ_ONLY` | `true` disables all tools that create or change anything (default `false`) | No |
-| `GAM_EVIDENCE_DIR` | Directory evidence screenshots are written to (default `./evidence`) | No |
-| `GAM_EVIDENCE_SITE_URL` | Default page to preview creatives on for screenshots | No |
-| `GAM_EVIDENCE_ALLOWED_HOSTS` | Comma-separated domains the screenshot browser may open (subdomains included) | Recommended in HTTP mode |
+| `GAM_EVIDENCE_SITE_URL` | Default page to preview creatives on (`get_preview_plan`) | No |
 
 ### Read-Only Mode
 
@@ -92,22 +90,33 @@ Upload tools (`upload_creative`, `upload_and_associate_creative`, `bulk_upload_c
 
 ### Evidence Screenshots
 
-`capture_campaign_screenshots` takes agency evidence screenshots for an order or line item: one per active creative and viewport (desktop 1440 px, mobile 390 px), without refreshing to catch rotating banners. Each creative is forced into its slot with an Ad Manager preview URL, opened in headless Chromium; the tool accepts common cookie consent banners, scrolls until the slot that rendered the creative appears, and saves:
+Agency evidence screenshots are taken on your own machine, not by the server. The server's read-only `get_preview_plan` tool lists every active creative of an order or line item with an Ad Manager preview URL that forces that creative into its slot, so rotating banners need no refreshing. The local `gam-evidence` command fetches that plan over MCP, opens each preview in headless Chromium (desktop 1440 px and mobile 390 px), accepts common cookie consent banners, scrolls until the slot that rendered the creative appears, and saves:
 
 ```
 evidence/<order>/<line item>/<creative>_<viewport>.png       # full page
 evidence/<order>/<line item>/<creative>_<viewport>_slot.png  # slot only
 evidence/<order>/evidence.pdf                                # everything, one page per capture
+evidence/<order>/summary.json                                # what was captured, also printed to stdout
 ```
 
-It needs the optional Playwright extra and a Chromium build:
+Install the optional Playwright extra and a Chromium build once:
 
 ```bash
 uv sync --extra screenshots
 uv run playwright install chromium
 ```
 
-Pass `site_url` (or `site_urls` per size, e.g. `{"300x250": "https://..."}`) for a page that requests the same ad unit and size, or set `GAM_EVIDENCE_SITE_URL`. Preview ignores key-values and geo targeting, and does not support SafeFrame or interstitial creatives; when the slot cannot be found the full page is still saved with a warning. Only public `http(s)` host names are opened; set `GAM_EVIDENCE_ALLOWED_HOSTS` to restrict them to your own sites. Screenshots stay on the machine running the server, and `evidence/` is git-ignored.
+Then point it at the running server (default `http://localhost:8080/mcp`, or `GAM_MCP_URL`) with the server's bearer token in `GAM_MCP_TOKEN`:
+
+```bash
+export GAM_MCP_TOKEN=...
+uv run gam-evidence --order 123456789 --site-url https://www.example.com/news/...
+uv run gam-evidence --line-item 987654321 \
+  --site-url-for 300x600=https://www.example.com/a --site-url-for 970x250=https://www.example.com/b \
+  --viewport desktop
+```
+
+The site URL must be a page that requests the same ad unit and size. Preview ignores key-values and geo targeting, and does not support SafeFrame or interstitial creatives. When a slot cannot be found the full page is still saved, with `diagnostics` in the summary: whether GPT loaded, whether the preview parameters survived redirects, and every slot on the page with its ad unit, sizes and rendered line item and creative. `--headed` shows the browser. If your DNS blocks Google's ad servers (an ad blocker), the command stops with a hint; `--public-dns` resolves just those hosts over DNS-over-HTTPS for its own browser. `evidence/` is git-ignored.
 
 ### Multi-Network Support
 
@@ -190,7 +199,7 @@ GAM_NETWORK_CODES=12345678 GAM_MCP_TRANSPORT=http GAM_MCP_PORT=9000 \
 
 The image runs the server's native HTTP transport (no proxy) as an unprivileged user (UID `10001`). It contains only the installed virtualenv: no source checkout, build tools or credentials. The build context is restricted by `.dockerignore`, and dependencies are installed from the committed `uv.lock`.
 
-Defaults inside the image: `GAM_MCP_TRANSPORT=http`, `GAM_MCP_HOST=0.0.0.0`, `GAM_MCP_PORT=8000`, `GAM_CREDENTIALS_PATH=/run/secrets/gam-credentials.json`, `GAM_UPLOAD_DIR=/uploads`, `GAM_EVIDENCE_DIR=/evidence`.
+Defaults inside the image: `GAM_MCP_TRANSPORT=http`, `GAM_MCP_HOST=0.0.0.0`, `GAM_MCP_PORT=8000`, `GAM_CREDENTIALS_PATH=/run/secrets/gam-credentials.json`, `GAM_UPLOAD_DIR=/uploads`.
 
 Keep the service account key **outside** the repository. The mounted key must be readable by UID `10001` (for example `chown 10001 key.json && chmod 400 key.json` on Linux, or use Docker/Compose secrets).
 
@@ -200,13 +209,7 @@ Keep the service account key **outside** the repository. The mounted key must be
 docker build -t google-ad-manager-mcp .
 ```
 
-The default image leaves out Playwright, so `capture_campaign_screenshots` returns an install hint and every other tool works. To include it (adds about 1 GB for Chromium and its system libraries):
-
-```bash
-docker build --build-arg WITH_SCREENSHOTS=1 -t google-ad-manager-mcp:screenshots .
-```
-
-Run that image as below, with these changes: mount a writable directory owned by UID `10001` at `/evidence` (`-v /path/to/evidence:/evidence`), raise the limits to `--memory 1g --pids-limit 512` for Chromium, and set `GAM_EVIDENCE_ALLOWED_HOSTS` to your own sites. Chromium runs without a sandbox of its own and with `--disable-dev-shm-usage`, so it works with `--read-only`, `--cap-drop ALL` and `no-new-privileges` and the default `/dev/shm`. Screenshots are written on the server: in HTTP mode the person asking only gets server file paths back, so collect them from the mounted directory.
+The image has no browser: evidence screenshots run on your machine with `gam-evidence` (see [Evidence Screenshots](#evidence-screenshots)).
 
 #### Run the Container
 
@@ -425,7 +428,7 @@ npx @modelcontextprotocol/inspector http://localhost:8000/mcp
 | `check_line_item_delivery_status` | Check delivery progress |
 | `get_delivery_progress` | Actual vs expected delivery for delivering line items, flags those behind |
 | `verify_order_setup` | Verify entire order setup |
-| `capture_campaign_screenshots` | Evidence screenshots (PNG + PDF) of every creative on a real page, desktop and mobile |
+| `get_preview_plan` | Preview URL per active creative of an order or line item, for the local `gam-evidence` screenshot command |
 
 ### Reporting Tools
 

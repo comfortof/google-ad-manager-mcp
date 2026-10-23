@@ -59,6 +59,7 @@ screenshots = [
 
 [project.scripts]
 gam-mcp = "gam_mcp.server:main"
+gam-evidence = "gam_mcp.evidence:main"
 google-ad-manager-mcp = "gam_mcp.server:main"
 
 [build-system]
