@@ -18,7 +18,9 @@ changes.
   `list_delivering_orders`, `list_line_items_by_order`).
 - **Site page per creative size.** The page must request the same ad unit and
   size as the line item, typically an article in the section the campaign
-  targets. Ask the user for it if they did not give one; do not guess. Use
+  targets. `get_line_item_inventory` shows which ad unit paths the line item
+  targets, and `get_ad_unit_pages` (by SITE or URL) where those units served.
+  Ask the user for it if they did not give one; do not guess. Use
   `--site-url` for one page, or `--site-url-for SIZE=URL` per size.
 - **Viewports:** desktop (1440 px) and mobile (390 px) by default; pass
   `--viewport desktop` or `--viewport mobile` to limit.

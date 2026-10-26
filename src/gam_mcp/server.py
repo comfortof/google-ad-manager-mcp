@@ -27,7 +27,9 @@ from fastmcp.exceptions import ToolError
 from starlette.middleware import Middleware as ASGIMiddleware
 
 from .client import init_gam_client, get_gam_client, is_gam_client_initialized
-from .tools import orders, line_items, creatives, advertisers, verification, reporting, delivery, previews
+from .tools import (
+    orders, line_items, creatives, advertisers, verification, reporting, delivery, previews, inventory,
+)
 from .uploads import UploadError
 
 # Authentication state - populated by main() when running with HTTP transport.
@@ -1068,6 +1070,109 @@ def verify_order_setup(order_id: int, network_code: Optional[str] = None) -> str
     """
     init_client()
     result = verification.verify_order_setup(order_id=order_id, network_code=network_code)
+    return json.dumps(result, indent=2)
+
+
+# =============================================================================
+# INVENTORY TOOLS
+# =============================================================================
+
+@mcp.tool()
+def find_ad_units(
+    ad_unit_id: Optional[int] = None,
+    name: Optional[str] = None,
+    code: Optional[str] = None,
+    parent_id: Optional[int] = None,
+    status: Optional[str] = "ACTIVE",
+    limit: int = 200,
+    network_code: Optional[str] = None,
+) -> str:
+    """Look up ad units: code, GPT path, sizes, description and status.
+
+    Read-only. The GPT path (e.g. /12345678/section/slot) is what a page
+    passes to googletag.defineSlot, so it tells which pages can request the
+    unit. Combine filters; with none, lists every active ad unit.
+
+    Args:
+        ad_unit_id: A single ad unit (any status).
+        name: Substring of the ad unit name.
+        code: Exact ad unit code.
+        parent_id: Direct children of this ad unit.
+        status: ACTIVE (default), INACTIVE, ARCHIVED, or null for all.
+        limit: Maximum ad units returned (default 200).
+        network_code: Optional GAM network code to target a specific network.
+            If not provided, uses the default network.
+    """
+    init_client()
+    result = inventory.find_ad_units(
+        ad_unit_id=ad_unit_id,
+        name=name,
+        code=code,
+        parent_id=parent_id,
+        status=status,
+        limit=limit,
+        network_code=network_code,
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_line_item_inventory(line_item_id: int, network_code: Optional[str] = None) -> str:
+    """Show which ad units a line item can serve on.
+
+    Read-only. Resolves the line item's inventory targeting to ad units with
+    GPT paths: targeted and excluded ad units (and whether their children are
+    included), targeted placements with their ad units, and run_of_network
+    when it targets the root ad unit, i.e. every page of the network.
+
+    Args:
+        line_item_id: The line item ID.
+        network_code: Optional GAM network code to target a specific network.
+            If not provided, uses the default network.
+    """
+    init_client()
+    result = inventory.get_line_item_inventory(line_item_id=line_item_id, network_code=network_code)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def get_ad_unit_pages(
+    ad_unit_id: int,
+    by: str = "SITE",
+    date_range_type: str = "LAST_WEEK",
+    include_descendants: bool = True,
+    limit: int = 50,
+    timeout_seconds: int = 120,
+    network_code: Optional[str] = None,
+) -> str:
+    """Report where an ad unit actually served: impressions per site or URL.
+
+    Read-only; runs a Historical report. Ad Manager keeps no list of pages per
+    ad unit, so this is the delivery-based answer. by=URL only covers Ad
+    Exchange and Open Bidding traffic on sites set up under Inventory > Sites;
+    SITE covers all demand. For the root ad unit with descendants the report
+    covers the whole network.
+
+    Args:
+        ad_unit_id: The ad unit ID.
+        by: SITE (default) or URL.
+        date_range_type: TODAY, YESTERDAY, LAST_WEEK (default), LAST_MONTH or LAST_3_MONTHS.
+        include_descendants: Include the ad unit's children (default true).
+        limit: Maximum rows returned, most impressions first (default 50).
+        timeout_seconds: Maximum seconds to wait for the report.
+        network_code: Optional GAM network code to target a specific network.
+            If not provided, uses the default network.
+    """
+    init_client()
+    result = inventory.get_ad_unit_pages(
+        ad_unit_id=ad_unit_id,
+        by=by,
+        date_range_type=date_range_type,
+        include_descendants=include_descendants,
+        limit=limit,
+        timeout_seconds=timeout_seconds,
+        network_code=network_code,
+    )
     return json.dumps(result, indent=2)
 
 

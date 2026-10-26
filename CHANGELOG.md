@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ad unit discovery tools, all read-only: `find_ad_units` (code, GPT path, sizes, description), `get_line_item_inventory` (a line item's targeting resolved to ad unit paths, including run-of-network) and `get_ad_unit_pages` (impressions per site or URL from a Historical report)
 - Agency evidence screenshots: the read-only `get_preview_plan` tool returns a preview URL per active creative of an order or line item, and the local `gam-evidence` command (optional `screenshots` extra) fetches that plan over MCP and captures each creative forced into its slot in headless Chromium; saves full-page and slot-only PNGs per desktop/mobile viewport, one combined PDF and a summary with slot diagnostics. The server image runs no browser
 - `GAM_READ_ONLY=true` read-only mode: the 18 tools that create or change anything are tagged `write` and are neither listed nor callable; unrecognised values stop the server from starting
 - `get_delivery_progress` tool: actual vs expected delivery (GAM's delivery indicator, as in the UI "Progress" bar) for delivering line items of an order or the whole network, flagging those behind by a configurable number of points

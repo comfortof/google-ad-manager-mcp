@@ -430,6 +430,16 @@ npx @modelcontextprotocol/inspector http://localhost:8000/mcp
 | `verify_order_setup` | Verify entire order setup |
 | `get_preview_plan` | Preview URL per active creative of an order or line item, for the local `gam-evidence` screenshot command |
 
+### Inventory Tools
+
+Ad Manager keeps no list of pages per ad unit; these tools answer "where does this ad unit run" from the ad unit setup, line item targeting and delivery.
+
+| Tool | Description |
+|------|-------------|
+| `find_ad_units` | Ad units by ID, name, code or parent, with the GPT path pages request (e.g. `/123456/news/news_mpu`), sizes, description and status |
+| `get_line_item_inventory` | A line item's targeted and excluded ad units and placements as GPT paths, flagging run-of-network |
+| `get_ad_unit_pages` | Impressions per site or URL for an ad unit and its children (URL covers Ad Exchange / Open Bidding only) |
+
 ### Reporting Tools
 
 | Tool | Description |
