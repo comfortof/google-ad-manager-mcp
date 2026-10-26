@@ -59,6 +59,34 @@ class TestListDeliveringOrders:
         assert result["total_line_items"] == 2
         assert len(result["orders"][0]["line_items"]) == 2
 
+    @patch("gam_mcp.tools.orders.get_gam_client")
+    def test_reads_every_page_of_line_items(self, mock_get_client):
+        """Delivering line items past GAM's 500 per page are not dropped."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_line_item_service = MagicMock()
+        mock_order_service = MagicMock()
+        pages = [
+            {"results": [{"id": i, "orderId": 100} for i in range(500)], "totalResultSetSize": 540},
+            {"results": [{"id": 500 + i, "orderId": 200} for i in range(40)], "totalResultSetSize": 540},
+        ]
+        mock_line_item_service.getLineItemsByStatement.side_effect = pages
+        mock_order_service.getOrdersByStatement.side_effect = lambda s: {"results": [{"id": 1}]}
+
+        def get_service(name):
+            if name == "LineItemService":
+                return mock_line_item_service
+            return mock_order_service
+
+        mock_client.get_service.side_effect = get_service
+
+        result = orders.list_delivering_orders()
+
+        assert mock_line_item_service.getLineItemsByStatement.call_count == 2
+        assert result["total_orders"] == 2
+        assert result["total_line_items"] == 540
+
 
 class TestGetOrder:
     """Tests for get_order function."""

@@ -3,7 +3,7 @@
 import logging
 from typing import Optional, List
 from ..client import get_gam_client
-from ..utils import safe_get, extract_date
+from ..utils import safe_get, extract_date, fetch_all_pages
 
 logger = logging.getLogger(__name__)
 
@@ -449,13 +449,13 @@ def list_line_items_by_order(order_id: int, network_code: Optional[str] = None) 
     statement = client.create_statement()
     statement = statement.Where("orderId = :orderId").WithBindVariable('orderId', order_id)
 
-    response = line_item_service.getLineItemsByStatement(statement.ToStatement())
+    results = fetch_all_pages(line_item_service.getLineItemsByStatement, statement)
 
-    if 'results' not in response:
+    if not results:
         return {"line_items": [], "total": 0}
 
     line_items = []
-    for li in response['results']:
+    for li in results:
         stats = safe_get(li, 'stats')
         impressions = safe_get(stats, 'impressionsDelivered', 0) or 0
         clicks = safe_get(stats, 'clicksDelivered', 0) or 0

@@ -3,7 +3,7 @@
 import logging
 from typing import Optional
 from ..client import get_gam_client
-from ..utils import safe_get
+from ..utils import safe_get, fetch_all_pages
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,13 @@ def find_advertiser(name: str, network_code: Optional[str] = None) -> dict:
         "name LIKE :name AND type = :type"
     ).WithBindVariable('name', f'%{name}%').WithBindVariable('type', 'ADVERTISER')
 
-    response = company_service.getCompaniesByStatement(statement.ToStatement())
+    results = fetch_all_pages(company_service.getCompaniesByStatement, statement)
 
-    if 'results' not in response or len(response['results']) == 0:
+    if not results:
         return {"advertisers": [], "message": f"No advertiser found matching '{name}'"}
 
     advertisers = []
-    for adv in response['results']:
+    for adv in results:
         advertisers.append({
             "id": safe_get(adv, 'id'),
             "name": safe_get(adv, 'name'),

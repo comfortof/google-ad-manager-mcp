@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, date
 from typing import Optional
 from ..client import get_gam_client
-from ..utils import safe_get, extract_date
+from ..utils import safe_get, extract_date, fetch_all_pages
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +29,10 @@ def list_delivering_orders(network_code: Optional[str] = None) -> dict:
         "status = :status"
     ).WithBindVariable('status', 'DELIVERING').OrderBy('orderId', ascending=True)
 
-    response = line_item_service.getLineItemsByStatement(statement.ToStatement())
+    line_items = fetch_all_pages(line_item_service.getLineItemsByStatement, statement)
 
-    if 'results' not in response or len(response['results']) == 0:
+    if not line_items:
         return {"orders": [], "message": "No delivering line items found"}
-
-    line_items = response['results']
 
     # Group by order ID
     orders_dict = {}
@@ -184,17 +182,14 @@ def get_order(
     li_statement = li_statement.Where(
         "orderId = :orderId"
     ).WithBindVariable('orderId', safe_get(order, 'id'))
-    li_response = line_item_service.getLineItemsByStatement(li_statement.ToStatement())
-
     line_items = []
-    if 'results' in li_response:
-        for li in li_response['results']:
-            line_items.append({
-                "id": safe_get(li, 'id'),
-                "name": safe_get(li, 'name'),
-                "status": safe_get(li, 'status'),
-                "type": safe_get(li, 'lineItemType')
-            })
+    for li in fetch_all_pages(line_item_service.getLineItemsByStatement, li_statement):
+        line_items.append({
+            "id": safe_get(li, 'id'),
+            "name": safe_get(li, 'name'),
+            "status": safe_get(li, 'status'),
+            "type": safe_get(li, 'lineItemType')
+        })
 
     return {
         "id": safe_get(order, 'id'),
