@@ -171,18 +171,22 @@ mcp.add_middleware(BearerAuthMiddleware())
 # =============================================================================
 
 @mcp.tool()
-def list_delivering_orders(network_code: Optional[str] = None) -> str:
+def list_delivering_orders(include_line_items: bool = False, network_code: Optional[str] = None) -> str:
     """List all orders with line items currently delivering ads.
 
     Args:
+        include_line_items: Also return every delivering line item with its
+            delivery, goal and pacing figures. Off by default because the full
+            list for a large network can exceed client message limits; for one
+            order use list_line_items_by_order or get_delivery_progress.
         network_code: Optional GAM network code to target a specific network.
             If not provided, uses the default network.
 
-    Returns a list of orders with their delivering line items,
-    including impression and click statistics.
+    Returns each order with its delivering line item count and delivered
+    impressions and clicks.
     """
     init_client()
-    result = orders.list_delivering_orders(network_code=network_code)
+    result = orders.list_delivering_orders(include_line_items=include_line_items, network_code=network_code)
     return json.dumps(result, indent=2)
 
 

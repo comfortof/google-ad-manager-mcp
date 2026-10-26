@@ -376,7 +376,7 @@ npx @modelcontextprotocol/inspector http://localhost:8000/mcp
 
 | Tool | Description |
 |------|-------------|
-| `list_delivering_orders` | List all orders with delivering line items |
+| `list_delivering_orders` | List all orders with delivering line items: per-order counts and delivery totals, or every line item with `include_line_items` |
 | `get_order` | Get order details by ID or name |
 | `create_order` | Create a new order |
 | `find_or_create_order` | Find existing or create new order |

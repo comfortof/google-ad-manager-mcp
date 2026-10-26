@@ -9,19 +9,106 @@ from ..utils import safe_get, extract_date, fetch_all_pages
 logger = logging.getLogger(__name__)
 
 
-def list_delivering_orders(network_code: Optional[str] = None) -> dict:
+ORDER_BATCH_SIZE = 400
+
+
+def _delivering_line_item(li) -> dict:
+    """Delivery, goal and pacing figures for one line item."""
+    # Extract dates safely
+    start_date = extract_date(safe_get(li, 'startDateTime'))
+    end_date = extract_date(safe_get(li, 'endDateTime'))
+
+    # Extract stats
+    stats = safe_get(li, 'stats')
+    impressions = safe_get(stats, 'impressionsDelivered', 0) or 0
+    clicks = safe_get(stats, 'clicksDelivered', 0) or 0
+
+    # Extract primary goal
+    primary_goal = safe_get(li, 'primaryGoal')
+    goal_type = safe_get(primary_goal, 'goalType')
+    goal_unit_type = safe_get(primary_goal, 'unitType')
+    goal_units = safe_get(primary_goal, 'units', 0) or 0
+
+    # Calculate progress
+    progress_pct = 0
+    if goal_units > 0:
+        progress_pct = round((impressions / goal_units) * 100, 2)
+
+    # Calculate pacing
+    pacing_pct = None
+    expected_delivery = None
+    days_elapsed = None
+    total_days = None
+
+    if start_date and end_date and goal_units > 0:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+            today = date.today()
+
+            total_days = (end_dt - start_dt).days
+            if total_days > 0:
+                days_elapsed = min((today - start_dt).days, total_days)
+                days_elapsed = max(days_elapsed, 0)
+
+                time_fraction = days_elapsed / total_days
+                expected_delivery = int(goal_units * time_fraction)
+
+                if expected_delivery > 0:
+                    pacing_pct = round((impressions / expected_delivery) * 100, 1)
+                elif days_elapsed == 0:
+                    pacing_pct = 100.0 if impressions == 0 else None
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "id": safe_get(li, 'id'),
+        "name": safe_get(li, 'name'),
+        "status": safe_get(li, 'status'),
+        "type": safe_get(li, 'lineItemType'),
+        "start_date": start_date,
+        "end_date": end_date,
+        "impressions_delivered": impressions,
+        "clicks_delivered": clicks,
+        "goal_type": goal_type,
+        "goal_unit_type": goal_unit_type,
+        "goal_units": goal_units,
+        "progress_percent": progress_pct,
+        "expected_delivery": expected_delivery,
+        "pacing_percent": pacing_pct,
+        "days_elapsed": days_elapsed,
+        "total_days": total_days
+    }
+
+
+def _fetch_orders(client, order_ids) -> dict:
+    """Orders by ID, fetched in batches rather than one call per order."""
+    order_service = client.get_service('OrderService')
+    orders = {}
+    for i in range(0, len(order_ids), ORDER_BATCH_SIZE):
+        id_list = ", ".join(str(int(o)) for o in order_ids[i:i + ORDER_BATCH_SIZE])
+        statement = client.create_statement().Where(f"id IN ({id_list})")
+        for order in fetch_all_pages(order_service.getOrdersByStatement, statement):
+            orders[safe_get(order, 'id')] = order
+    return orders
+
+
+def list_delivering_orders(include_line_items: bool = False, network_code: Optional[str] = None) -> dict:
     """List all orders with line items currently delivering.
 
     Args:
+        include_line_items: Include each delivering line item with its delivery,
+            goal and pacing figures. Off by default: across a whole network the
+            full list can run to megabytes.
         network_code: Optional GAM network code. Uses default if not provided.
 
     Returns:
-        dict with orders and their delivering line items
+        dict with orders, each with its delivering line item count and
+        delivered impressions and clicks, plus the line items when requested
     """
     client = get_gam_client(network_code=network_code)
 
     line_item_service = client.get_service('LineItemService')
-    order_service = client.get_service('OrderService')
 
     # Get delivering line items using bind variable
     statement = client.create_statement()
@@ -37,108 +124,41 @@ def list_delivering_orders(network_code: Optional[str] = None) -> dict:
     # Group by order ID
     orders_dict = {}
     for li in line_items:
-        order_id = safe_get(li, 'orderId')
-        if order_id not in orders_dict:
-            orders_dict[order_id] = []
-        orders_dict[order_id].append(li)
+        orders_dict.setdefault(safe_get(li, 'orderId'), []).append(li)
 
-    # Fetch order details
+    orders = _fetch_orders(client, list(orders_dict))
+
     result_orders = []
-
     for order_id, order_line_items in orders_dict.items():
-        order_statement = client.create_statement()
-        order_statement = order_statement.Where(
-            "id = :id"
-        ).WithBindVariable('id', order_id)
-        order_response = order_service.getOrdersByStatement(order_statement.ToStatement())
+        order = orders.get(order_id)
+        if order is None:
+            continue
+        entries = [_delivering_line_item(li) for li in order_line_items]
+        order_data = {
+            "id": safe_get(order, 'id'),
+            "name": safe_get(order, 'name'),
+            "status": safe_get(order, 'status'),
+            "advertiser_id": safe_get(order, 'advertiserId'),
+            "trafficker_id": safe_get(order, 'traffickerId'),
+            "delivering_line_items": len(entries),
+            "impressions_delivered": sum(e["impressions_delivered"] for e in entries),
+            "clicks_delivered": sum(e["clicks_delivered"] for e in entries),
+        }
+        if include_line_items:
+            order_data["line_items"] = entries
+        result_orders.append(order_data)
 
-        if 'results' in order_response and len(order_response['results']) > 0:
-            order = order_response['results'][0]
-
-            order_data = {
-                "id": safe_get(order, 'id'),
-                "name": safe_get(order, 'name'),
-                "status": safe_get(order, 'status'),
-                "advertiser_id": safe_get(order, 'advertiserId'),
-                "trafficker_id": safe_get(order, 'traffickerId'),
-                "line_items": []
-            }
-
-            for li in order_line_items:
-                # Extract dates safely
-                start_date = extract_date(safe_get(li, 'startDateTime'))
-                end_date = extract_date(safe_get(li, 'endDateTime'))
-
-                # Extract stats
-                stats = safe_get(li, 'stats')
-                impressions = safe_get(stats, 'impressionsDelivered', 0) or 0
-                clicks = safe_get(stats, 'clicksDelivered', 0) or 0
-
-                # Extract primary goal
-                primary_goal = safe_get(li, 'primaryGoal')
-                goal_type = safe_get(primary_goal, 'goalType')
-                goal_unit_type = safe_get(primary_goal, 'unitType')
-                goal_units = safe_get(primary_goal, 'units', 0) or 0
-
-                # Calculate progress
-                progress_pct = 0
-                if goal_units > 0:
-                    progress_pct = round((impressions / goal_units) * 100, 2)
-
-                # Calculate pacing
-                pacing_pct = None
-                expected_delivery = None
-                days_elapsed = None
-                total_days = None
-
-                if start_date and end_date and goal_units > 0:
-                    try:
-                        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
-                        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
-                        today = date.today()
-
-                        total_days = (end_dt - start_dt).days
-                        if total_days > 0:
-                            days_elapsed = min((today - start_dt).days, total_days)
-                            days_elapsed = max(days_elapsed, 0)
-
-                            time_fraction = days_elapsed / total_days
-                            expected_delivery = int(goal_units * time_fraction)
-
-                            if expected_delivery > 0:
-                                pacing_pct = round((impressions / expected_delivery) * 100, 1)
-                            elif days_elapsed == 0:
-                                pacing_pct = 100.0 if impressions == 0 else None
-                    except (ValueError, TypeError):
-                        pass
-
-                line_item_data = {
-                    "id": safe_get(li, 'id'),
-                    "name": safe_get(li, 'name'),
-                    "status": safe_get(li, 'status'),
-                    "type": safe_get(li, 'lineItemType'),
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "impressions_delivered": impressions,
-                    "clicks_delivered": clicks,
-                    "goal_type": goal_type,
-                    "goal_unit_type": goal_unit_type,
-                    "goal_units": goal_units,
-                    "progress_percent": progress_pct,
-                    "expected_delivery": expected_delivery,
-                    "pacing_percent": pacing_pct,
-                    "days_elapsed": days_elapsed,
-                    "total_days": total_days
-                }
-                order_data["line_items"].append(line_item_data)
-
-            result_orders.append(order_data)
-
-    return {
+    result = {
         "orders": result_orders,
         "total_orders": len(result_orders),
-        "total_line_items": sum(len(o["line_items"]) for o in result_orders)
+        "total_line_items": sum(o["delivering_line_items"] for o in result_orders)
     }
+    if not include_line_items:
+        result["message"] = (
+            "Summary per order. Pass include_line_items=true for line item details, "
+            "or use list_line_items_by_order / get_delivery_progress for one order."
+        )
+    return result
 
 
 def get_order(

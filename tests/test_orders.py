@@ -24,66 +24,94 @@ class TestListDeliveringOrders:
         assert result["orders"] == []
         assert "No delivering line items found" in result["message"]
 
-    @patch("gam_mcp.tools.orders.get_gam_client")
-    def test_groups_line_items_by_order(self, mock_get_client):
-        """Test line items are correctly grouped by order ID."""
+    @staticmethod
+    def _setup(mock_get_client, line_item_pages, order_ids):
+        """Line item pages in order; every requested order ID that is in order_ids is found."""
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
+        services = {"LineItemService": MagicMock(), "OrderService": MagicMock()}
+        mock_client.get_service.side_effect = services.__getitem__
+        services["LineItemService"].getLineItemsByStatement.side_effect = line_item_pages
 
-        mock_line_item_service = MagicMock()
-        mock_order_service = MagicMock()
+        where_clauses = []
 
-        # Two line items for same order
-        mock_line_item_service.getLineItemsByStatement.return_value = {
-            "results": [
-                {"id": 1, "orderId": 100, "name": "LI1", "status": "DELIVERING"},
-                {"id": 2, "orderId": 100, "name": "LI2", "status": "DELIVERING"},
-            ]
-        }
+        def where(clause):
+            where_clauses.append(clause)
+            return mock_client.create_statement.return_value
 
-        mock_order_service.getOrdersByStatement.return_value = {
-            "results": [{"id": 100, "name": "Order 1", "status": "APPROVED"}]
-        }
+        mock_client.create_statement.return_value.Where.side_effect = where
+        mock_client.create_statement.return_value.WithBindVariable.return_value = (
+            mock_client.create_statement.return_value
+        )
 
-        def get_service(name):
-            if name == "LineItemService":
-                return mock_line_item_service
-            return mock_order_service
+        def get_orders(_statement):
+            requested = [int(i) for i in where_clauses[-1][len("id IN ("):-1].split(", ")]
+            return {"results": [
+                {"id": i, "name": f"Order {i}", "status": "APPROVED"} for i in requested if i in order_ids
+            ]}
 
-        mock_client.get_service.side_effect = get_service
-        mock_client.create_statement.return_value = MagicMock()
+        services["OrderService"].getOrdersByStatement.side_effect = get_orders
+        return services, where_clauses
+
+    @patch("gam_mcp.tools.orders.get_gam_client")
+    def test_summary_by_default(self, mock_get_client):
+        """Orders carry line item counts and delivery totals, not the line items."""
+        line_items = [
+            {"id": 1, "orderId": 100, "stats": {"impressionsDelivered": 10, "clicksDelivered": 1}},
+            {"id": 2, "orderId": 100, "stats": {"impressionsDelivered": 5, "clicksDelivered": 0}},
+            {"id": 3, "orderId": 200},
+        ]
+        self._setup(mock_get_client, [{"results": line_items}], {100, 200})
 
         result = orders.list_delivering_orders()
 
-        assert result["total_orders"] == 1
-        assert result["total_line_items"] == 2
-        assert len(result["orders"][0]["line_items"]) == 2
+        assert result["total_orders"] == 2
+        assert result["total_line_items"] == 3
+        first = result["orders"][0]
+        assert (first["id"], first["delivering_line_items"]) == (100, 2)
+        assert (first["impressions_delivered"], first["clicks_delivered"]) == (15, 1)
+        assert "line_items" not in first
+        assert "include_line_items" in result["message"]
+
+    @patch("gam_mcp.tools.orders.get_gam_client")
+    def test_include_line_items(self, mock_get_client):
+        """Line item details are returned when asked for."""
+        line_items = [
+            {"id": 1, "orderId": 100, "name": "LI1", "status": "DELIVERING"},
+            {"id": 2, "orderId": 100, "name": "LI2", "status": "DELIVERING"},
+        ]
+        self._setup(mock_get_client, [{"results": line_items}], {100})
+
+        result = orders.list_delivering_orders(include_line_items=True)
+
+        assert [li["name"] for li in result["orders"][0]["line_items"]] == ["LI1", "LI2"]
+        assert "message" not in result
+
+    @patch("gam_mcp.tools.orders.get_gam_client")
+    def test_orders_fetched_in_batches(self, mock_get_client):
+        """Orders are looked up a batch at a time, not one call per order."""
+        line_items = [{"id": i, "orderId": 1000 + i} for i in range(450)]
+        services, where_clauses = self._setup(mock_get_client, [{"results": line_items}], set(range(1000, 1449)))
+
+        result = orders.list_delivering_orders()
+
+        assert services["OrderService"].getOrdersByStatement.call_count == 2
+        assert [c.count(",") + 1 for c in where_clauses if c.startswith("id IN")] == [400, 50]
+        # Line items whose order is not found are left out
+        assert result["total_orders"] == 449
 
     @patch("gam_mcp.tools.orders.get_gam_client")
     def test_reads_every_page_of_line_items(self, mock_get_client):
         """Delivering line items past GAM's 500 per page are not dropped."""
-        mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
-
-        mock_line_item_service = MagicMock()
-        mock_order_service = MagicMock()
         pages = [
             {"results": [{"id": i, "orderId": 100} for i in range(500)], "totalResultSetSize": 540},
             {"results": [{"id": 500 + i, "orderId": 200} for i in range(40)], "totalResultSetSize": 540},
         ]
-        mock_line_item_service.getLineItemsByStatement.side_effect = pages
-        mock_order_service.getOrdersByStatement.side_effect = lambda s: {"results": [{"id": 1}]}
-
-        def get_service(name):
-            if name == "LineItemService":
-                return mock_line_item_service
-            return mock_order_service
-
-        mock_client.get_service.side_effect = get_service
+        services, _ = self._setup(mock_get_client, pages, {100, 200})
 
         result = orders.list_delivering_orders()
 
-        assert mock_line_item_service.getLineItemsByStatement.call_count == 2
+        assert services["LineItemService"].getLineItemsByStatement.call_count == 2
         assert result["total_orders"] == 2
         assert result["total_line_items"] == 540
 

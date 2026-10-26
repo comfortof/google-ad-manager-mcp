@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `list_delivering_orders` returns a summary per order (delivering line item count, delivered impressions and clicks) by default; pass `include_line_items=true` for the previous per-line-item detail, which for a large network can exceed MCP client message limits. Orders are now fetched in batches instead of one request per order
 - Upgraded FastMCP from 2.14 to 4.1 (MCP SDK 2.3); this drops the `diskcache` dependency and resolves the FastMCP and diskcache advisories from the security review
 - Upgraded `googleads` from 48 to 51 and moved the default Ad Manager SOAP API version to `v202608` (sunset August 2027); the previous default `v202602` was not supported by `googleads` 48
 - The server now refuses to start when `GAM_API_VERSION` names a version the installed `googleads` library does not support
@@ -32,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `list_delivering_orders`, `get_order`, `list_line_items_by_order` and `find_advertiser` read every page of results; they stopped at GAM's first 500
 - `create_campaign` no longer reports success when creative uploads or associations fail, and validates the creatives folder before creating anything
 - Association failures in `upload_and_associate_creative` are reported as errors, fixing a `KeyError` in `bulk_upload_creatives`
 - `update_line_item` works with real Zeep responses, and a successful update is no longer reported as a failure
