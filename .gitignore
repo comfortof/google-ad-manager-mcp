@@ -107,3 +107,6 @@ dmypy.json
 
 # pyright
 pyrightconfig.json
+
+# Local MCP client config for a specific deployment
+.pi/mcp.json

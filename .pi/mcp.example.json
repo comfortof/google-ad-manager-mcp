@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "google-ad-manager": {
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "!echo Bearer $(gcloud secrets versions access latest --secret gam-mcp-auth-token --project $GAM_MCP_PROJECT)"
+      },
+      "timeout": 900,
+      "description": "Google Ad Manager via Cloud Run (start: gcloud run services proxy gam-mcp --region $GAM_MCP_REGION --project $GAM_MCP_PROJECT --port 8080)"
+    }
+  }
+}

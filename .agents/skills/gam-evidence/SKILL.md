@@ -27,7 +27,10 @@ changes.
 
 ## 2. Check the prerequisites
 
-Run from the repository root.
+Run from the repository root. `GAM_MCP_PROJECT` and `GAM_MCP_REGION` name
+the Google Cloud project and region of the `gam-mcp` Cloud Run service; if
+they are not set, read them from `.pi/mcp.json` (local, not committed) or
+ask the user.
 
 1. The MCP server proxy must answer on port 8080:
    `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/mcp`
